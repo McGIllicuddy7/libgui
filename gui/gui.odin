@@ -54,6 +54,7 @@ WidgetType :: enum {
 }
 
 Widget :: struct {
+	lock:                sync.Mutex,
 	id:                  WidgetId,
 	type:                WidgetType,
 	bounds:              Boundary,
@@ -720,8 +721,16 @@ gui_calculate_dimensions :: proc(
 					)
 				}
 			}
-			if depth <= 4 && len(widgets) > 2 << (cast(uint)depth + 1) {
-				THREAD_COUNT: int = 8
+			if depth <= 3 && len(widgets) > 4 {
+				@(static) THREAD_COUNT_LOCK: sync.Mutex
+				@(static) THREAD_COUNT: int = -1
+				{
+					sync.mutex_lock(&THREAD_COUNT_LOCK)
+					defer sync.mutex_unlock(&THREAD_COUNT_LOCK)
+					if THREAD_COUNT == -1 {
+						THREAD_COUNT = os.get_processor_core_count()
+					}
+				}
 				join_list := make([dynamic]^thread.Thread)
 				reserve_dynamic_array(&join_list, THREAD_COUNT)
 				defer {
@@ -733,7 +742,7 @@ gui_calculate_dimensions :: proc(
 				if len(widgets) < THREAD_COUNT {
 					for i in 0 ..< len(widgets) {
 						list: []^Widget = widgets[i:i + 1]
-						ag := ThreadArgs{list, gui, t_max_width, t_max_height, depth}
+						ag := ThreadArgs{list, gui, t_max_width, t_max_height, 512}
 						if i != len(widgets) - 1 {
 							t := thread.create_and_start_with_poly_data(ag, thread_proc)
 							append(&join_list, t)
@@ -749,7 +758,7 @@ gui_calculate_dimensions :: proc(
 							end_idx = len(widgets)
 						}
 						list: []^Widget = widgets[base_idx:end_idx]
-						ag := ThreadArgs{list, gui, t_max_width, t_max_height, depth}
+						ag := ThreadArgs{list, gui, t_max_width, t_max_height, 512}
 						if i < THREAD_COUNT - 1 {
 							t := thread.create_and_start_with_poly_data(
 								ag,
