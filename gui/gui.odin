@@ -608,6 +608,13 @@ gui_calculate_dimensions :: proc(
 	max_height: i32,
 	depth: int,
 ) {
+	depth := depth
+	if depth == 0 {
+		count := widget_count_children(this)
+		if count < 1000 {
+			depth = 512
+		}
+	}
 	if this.is_leaf {
 		width_base := max_width
 		height_base := max_height
