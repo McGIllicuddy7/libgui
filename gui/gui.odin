@@ -1,6 +1,7 @@
 package gui
 import "base:runtime"
 import "core:fmt"
+import "core:math"
 import "core:mem"
 import "core:slice"
 import "core:strings"
@@ -691,6 +692,11 @@ gui_calculate_dimensions :: proc(
 			assert(false, "containers, and cannot be marked leaf nodes")
 		}
 	} else {
+		l := cast(i32)len(this.children)
+		if l == 0 {
+			l = 1
+		}
+		//	fmt.printf("l:%d\n", l)
 		switch this.container_kind {
 		case .VerticalContainer:
 			{
@@ -713,35 +719,27 @@ gui_calculate_dimensions :: proc(
 						break
 					} else {
 						disp := (dy - guess_max_height)
-						l := cast(i32)len(this.children)
-						if l == 0 {
-							l = 1
+						delta: i32 = disp / (l)
+						if l * 2 > disp {
+							delta = 5
 						}
-						if disp > 100 {
-							guess_max_height -= disp / l
-						} else if disp > 10 {
-							guess_max_height -= 2
-						} else {
-							guess_max_height -= 1
+						if delta < 0 {
+							delta = 1
 						}
+						guess_max_height -= delta
 					}
 				}
 			}
 		case .HorizontalContainer:
 			{
 				guess_max_width := max_width - this.style.padding * 2
-				extra_width: i32 = 0
 				for {
 					dx: i32 = 0
 					dy: i32 = this.style.padding
 					t_max_width := guess_max_width
 					t_max_height := max_height - this.style.padding * 2
 					for i in this.children {
-						tm := extra_width if extra_width > 0 else 0
-						if extra_width > 0 {
-							extra_width -= 1
-						}
-						gui_calculate_dimensions(i, gui, t_max_width + tm, t_max_height)
+						gui_calculate_dimensions(i, gui, t_max_width, t_max_height)
 						if i.bounds.height + this.style.padding * 2 > dy {
 							dy = i.bounds.height + this.style.padding * 2
 						}
@@ -753,19 +751,17 @@ gui_calculate_dimensions :: proc(
 						break
 					} else {
 						disp := (dx - guess_max_width)
-						l := cast(i32)len(this.children)
-						if l == 0 {
-							l = 1
+						delta: i32 = disp / (l)
+						if l * 2 > disp {
+							delta = 5
 						}
-						if disp > 100 {
-							guess_max_width -= disp / l
-						} else if disp > 10 {
-							guess_max_width -= 2
-						} else {
-							guess_max_width -= 1
+						if delta < 0 {
+							delta = 1
 						}
+						guess_max_width -= delta
 					}
 				}
+
 			}
 		case .ScrollBox:
 			this.bounds.width = max_width
@@ -841,6 +837,13 @@ render_text :: proc(this: ^Widget, gui: ^Gui, x_off: i32 = 0, y_off: i32 = 0) {
 	}
 }
 
+widget_count_children :: proc(this: ^Widget) -> int {
+	out := len(this.children)
+	for i in this.children {
+		out += widget_count_children(i)
+	}
+	return out
+}
 gui_render_widget :: proc(this: ^Widget, gui: ^Gui) {
 
 	if this.custom_render == nil {
