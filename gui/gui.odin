@@ -3,8 +3,11 @@ import "base:runtime"
 import "core:fmt"
 import "core:math"
 import "core:mem"
+import "core:os"
 import "core:slice"
 import "core:strings"
+import "core:sync"
+import "core:thread"
 import "core:unicode/utf8"
 import "vendor:raylib"
 Color :: raylib.Color
@@ -105,22 +108,23 @@ MeasureTextCacheValue :: struct {
 }
 
 Gui :: struct {
-	bounds:             Boundary,
-	root:               ^Widget,
-	panels:             [dynamic]^Widget,
-	current_widget:     ^Widget,
-	prev_widget_stack:  [dynamic]^Widget,
-	current_style:      ^WidgetStyle,
-	prev_style_stack:   [dynamic]^WidgetStyle,
-	arena:              mem.Dynamic_Arena,
-	alloc:              mem.Allocator,
-	data_table:         map[WidgetId]CachedWidgetData,
-	font:               raylib.Font,
-	input_data:         InputData,
-	default_style:      WidgetStyle,
-	frame_over:         bool,
-	measure_text_cache: map[MeasureTextCacheKey]MeasureTextCacheValue,
-	using_default_font: bool,
+	bounds:                  Boundary,
+	root:                    ^Widget,
+	panels:                  [dynamic]^Widget,
+	current_widget:          ^Widget,
+	prev_widget_stack:       [dynamic]^Widget,
+	current_style:           ^WidgetStyle,
+	prev_style_stack:        [dynamic]^WidgetStyle,
+	arena:                   mem.Dynamic_Arena,
+	alloc:                   mem.Allocator,
+	data_table:              map[WidgetId]CachedWidgetData,
+	font:                    raylib.Font,
+	input_data:              InputData,
+	default_style:           WidgetStyle,
+	frame_over:              bool,
+	measure_text_cache_lock: sync.RW_Mutex,
+	measure_text_cache:      map[MeasureTextCacheKey]MeasureTextCacheValue,
+	using_default_font:      bool,
 }
 
 make_widget_id :: proc(text: string, loc: runtime.Source_Code_Location, idx: int) -> WidgetId {
@@ -488,13 +492,13 @@ end_horizontal_div :: proc(this: ^Gui) {
 
 gui_determine_layout :: proc(this: ^Gui) {
 	if this.root != nil {
-		gui_calculate_dimensions(this.root, this, this.bounds.width, this.bounds.height)
+		gui_calculate_dimensions(this.root, this, this.bounds.width, this.bounds.height, 0)
 		shift_x := (this.bounds.width - this.root.bounds.width) / 2
 		shift_y := (this.bounds.height - this.root.bounds.height) / 2
 		gui_build_layout(this.root, this, this.bounds.x + shift_x, this.bounds.y + shift_y)
 	}
 	for i in this.panels {
-		gui_calculate_dimensions(i, this, i.bounds.width, i.bounds.height)
+		gui_calculate_dimensions(i, this, i.bounds.width, i.bounds.height, 0)
 		gui_build_layout(i, this, i.bounds.x, i.bounds.y)
 	}
 }
@@ -601,7 +605,7 @@ gui_calculate_dimensions :: proc(
 	gui: ^Gui,
 	max_width: i32,
 	max_height: i32,
-	handle_assertions := false,
+	depth: int,
 ) {
 	if this.is_leaf {
 		width_base := max_width
@@ -692,11 +696,92 @@ gui_calculate_dimensions :: proc(
 			assert(false, "containers, and cannot be marked leaf nodes")
 		}
 	} else {
+		calculate_child_dimensions :: proc(
+			gui: ^Gui,
+			widgets: []^Widget,
+			t_max_width, t_max_height: i32,
+			depth: int,
+		) {
+			ThreadArgs :: struct {
+				widgets:      []^Widget,
+				gui:          ^Gui,
+				t_max_width:  i32,
+				t_max_height: i32,
+				depth:        int,
+			}
+			thread_proc :: proc(data: ThreadArgs) {
+				for i in data.widgets {
+					gui_calculate_dimensions(
+						i,
+						data.gui,
+						data.t_max_width,
+						data.t_max_height,
+						data.depth + 1,
+					)
+				}
+			}
+			if depth <= 4 && len(widgets) > 2 << (cast(uint)depth + 1) {
+				THREAD_COUNT: int = 8
+				join_list := make([dynamic]^thread.Thread)
+				reserve_dynamic_array(&join_list, THREAD_COUNT)
+				defer {
+					for i in join_list {
+						thread.join(i)
+					}
+					delete(join_list)
+				}
+				if len(widgets) < THREAD_COUNT {
+					for i in 0 ..< len(widgets) {
+						list: []^Widget = widgets[i:i + 1]
+						ag := ThreadArgs{list, gui, t_max_width, t_max_height, depth}
+						if i != len(widgets) - 1 {
+							t := thread.create_and_start_with_poly_data(ag, thread_proc)
+							append(&join_list, t)
+						} else {
+							thread_proc(ag)
+						}
+					}
+				} else {
+					for i in 0 ..< THREAD_COUNT {
+						base_idx := (i * len(widgets)) / THREAD_COUNT
+						end_idx := ((i + 1) * len(widgets)) / THREAD_COUNT
+						if i == THREAD_COUNT - 1 {
+							end_idx = len(widgets)
+						}
+						list: []^Widget = widgets[base_idx:end_idx]
+						ag := ThreadArgs{list, gui, t_max_width, t_max_height, depth}
+						if i < THREAD_COUNT - 1 {
+							t := thread.create_and_start_with_poly_data(
+								ag,
+								proc(data: ThreadArgs) {
+									for i in data.widgets {
+										gui_calculate_dimensions(
+											i,
+											data.gui,
+											data.t_max_width,
+											data.t_max_height,
+											data.depth + 1,
+										)
+									}
+								},
+							)
+							append(&join_list, t)
+						} else {
+							thread_proc(ag)
+						}
+					}
+				}
+
+			} else {
+				for i in widgets {
+					gui_calculate_dimensions(i, gui, t_max_width, t_max_height, depth + 1)
+				}
+			}
+		}
 		l := cast(i32)len(this.children)
 		if l == 0 {
 			l = 1
 		}
-		//	fmt.printf("l:%d\n", l)
 		switch this.container_kind {
 		case .VerticalContainer:
 			{
@@ -706,8 +791,14 @@ gui_calculate_dimensions :: proc(
 					dy: i32 = this.style.padding
 					t_max_width := max_width - this.style.padding * 2
 					t_max_height := guess_max_height
+					calculate_child_dimensions(
+						gui,
+						this.children[:],
+						t_max_width,
+						t_max_height,
+						depth,
+					)
 					for i in this.children {
-						gui_calculate_dimensions(i, gui, t_max_width, t_max_height)
 						if i.bounds.width + this.style.padding * 2 > dx {
 							dx = i.bounds.width + this.style.padding * 2
 						}
@@ -738,8 +829,14 @@ gui_calculate_dimensions :: proc(
 					dy: i32 = this.style.padding
 					t_max_width := guess_max_width
 					t_max_height := max_height - this.style.padding * 2
+					calculate_child_dimensions(
+						gui,
+						this.children[:],
+						t_max_width,
+						t_max_height,
+						depth,
+					)
 					for i in this.children {
-						gui_calculate_dimensions(i, gui, t_max_width, t_max_height)
 						if i.bounds.height + this.style.padding * 2 > dy {
 							dy = i.bounds.height + this.style.padding * 2
 						}
@@ -766,12 +863,16 @@ gui_calculate_dimensions :: proc(
 		case .ScrollBox:
 			this.bounds.width = max_width
 			this.bounds.height = max_height
-			guess_max_height: i32 = 2 << 16
+			guess_max_height: i32 = 2 << 12
 			guess_max_width := max_width - this.style.padding * 2
 			tmax_height := guess_max_height
-			for i in this.children {
-				gui_calculate_dimensions(i, gui, guess_max_width, guess_max_height)
-			}
+			calculate_child_dimensions(
+				gui,
+				this.children[:],
+				guess_max_width,
+				guess_max_height,
+				depth,
+			)
 			mx_x: i32 = 0
 			for i in this.children {
 				if i.bounds.width + this.style.padding * 2 > mx_x {
@@ -1054,13 +1155,17 @@ measure_text_given_width :: proc(
 	width, height: i32,
 ) {
 	key := MeasureTextCacheKey{strings.clone(text), text_height, max_width}
-	if key in this.measure_text_cache {
-		tmp := &this.measure_text_cache[key]
-		delete(key.text)
-		tmp.hit_this_frame = true
-		width = tmp.width
-		height = tmp.height
-		return
+	{
+		sync.rw_mutex_shared_lock(&this.measure_text_cache_lock)
+		defer sync.rw_mutex_shared_unlock(&this.measure_text_cache_lock)
+		if key in this.measure_text_cache {
+			tmp := &this.measure_text_cache[key]
+			delete(key.text)
+			tmp.hit_this_frame = true
+			width = tmp.width
+			height = tmp.height
+			return
+		}
 	}
 	dy: i32 = 0
 	max_dx: i32 = 0
@@ -1129,7 +1234,11 @@ measure_text_given_width :: proc(
 	}
 	width = max_dx
 	height = (dy + 1) * text_height
-	this.measure_text_cache[key] = {width, height, true}
+	{
+		sync.rw_mutex_lock(&this.measure_text_cache_lock)
+		defer sync.rw_mutex_unlock(&this.measure_text_cache_lock)
+		this.measure_text_cache[key] = {width, height, true}
+	}
 	return
 }
 
