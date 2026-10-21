@@ -109,6 +109,7 @@ MeasureTextCacheValue :: struct {
 }
 
 Gui :: struct {
+	can_multithread:         bool,
 	bounds:                  Boundary,
 	root:                    ^Widget,
 	panels:                  [dynamic]^Widget,
@@ -142,7 +143,7 @@ FONT_DATA: []u8 = #load("../Ac437_IBM_VGA_9x16.ttf")
 create_gui :: proc(x: i32, y: i32, width: i32, height: i32) -> ^Gui {
 	out := new(Gui)
 	out.bounds = {x, y, width, height}
-	out.using_default_font = true
+	out.using_default_font = false
 	if !out.using_default_font {
 		out.font = raylib.LoadFontFromMemory(
 			".ttf",
@@ -728,7 +729,7 @@ gui_calculate_dimensions :: proc(
 					)
 				}
 			}
-			if depth <= 3 && len(widgets) > 4 {
+			if depth <= 3 && len(widgets) > 4 && gui.can_multithread {
 				@(static) THREAD_COUNT_LOCK: sync.Mutex
 				@(static) THREAD_COUNT: int = -1
 				{
@@ -758,9 +759,12 @@ gui_calculate_dimensions :: proc(
 						}
 					}
 				} else {
+					heighest_idx := -1
 					for i in 0 ..< THREAD_COUNT {
 						base_idx := (i * len(widgets)) / THREAD_COUNT
+						assert(base_idx > heighest_idx)
 						end_idx := ((i + 1) * len(widgets)) / THREAD_COUNT
+						heighest_idx = end_idx - 1
 						if i == THREAD_COUNT - 1 {
 							end_idx = len(widgets)
 						}
@@ -802,6 +806,7 @@ gui_calculate_dimensions :: proc(
 		case .VerticalContainer:
 			{
 				guess_max_height := max_height - this.style.padding * 2
+				count := 0
 				for {
 					dx: i32 = 0
 					dy: i32 = this.style.padding
@@ -826,19 +831,22 @@ gui_calculate_dimensions :: proc(
 						break
 					} else {
 						disp := (dy - guess_max_height)
-						delta: i32 = disp / (l)
-						if l * 2 > disp {
-							delta = 5
-						}
-						if delta < 0 {
-							delta = 1
+						delta: i32 = 16
+						if count == 0 {
+							delta = disp / l
+						} else if count <= 3 {
+							delta = disp / (l * 2)
+						} else if count <= 6 {
+							delta = disp / (l * 4)
 						}
 						guess_max_height -= delta
 					}
+					count += 1
 				}
 			}
 		case .HorizontalContainer:
 			{
+				count := 0
 				guess_max_width := max_width - this.style.padding * 2
 				for {
 					dx: i32 = 0
@@ -864,16 +872,19 @@ gui_calculate_dimensions :: proc(
 						break
 					} else {
 						disp := (dx - guess_max_width)
-						delta: i32 = disp / (l)
-						if l * 2 > disp {
-							delta = 5
-						}
-						if delta < 0 {
-							delta = 1
+						delta: i32 = 16
+						if count == 0 {
+							delta = disp / (l * 2)
+						} else if count <= 6 {
+							delta = disp / (l * 4)
+						} else if count <= 12 {
+							delta = disp / (l * 8)
 						}
 						guess_max_width -= delta
 					}
+					count += 1
 				}
+
 
 			}
 		case .ScrollBox:
@@ -918,12 +929,22 @@ gui_render :: proc(this: ^Gui) {
 		this.bounds.height,
 		this.default_style.background_color,
 	)
+	count := 0
 	if this.root != nil {
 		gui_render_widget(this.root, this)
+		count += widget_count_children(this.root)
 	}
 	for i in this.panels {
 		gui_render_widget(i, this)
+		count += widget_count_children(i)
 	}
+	raylib.DrawText(
+		fmt.ctprintf("widget count:%d", count),
+		this.bounds.x,
+		this.bounds.y,
+		16,
+		raylib.GREEN,
+	)
 }
 
 render_image :: proc(img: string, x: i32, y: i32, width: i32, height: i32, gui: ^Gui) {
@@ -1349,4 +1370,4 @@ split_text_given_width :: proc(
 	return
 }
 
-LOREM_IPSUM :: "Lorem ipsum dolor sit amet, consectetur adipiscing elit. Quisque non convallis purus. Mauris iaculis rhoncus lobortis. Donec ac porttitor lectus, ut ullamcorper turpis. Etiam purus nulla, tincidunt ac fermentum vel, pharetra vel nisi. Aliquam egestas molestie ipsum a condimentum. Curabitur volutpat justo gravida, maximus massa ut, euismod mauris. Ut imperdiet, odio non laoreet tincidunt, leo enim mattis lectus, et volutpat purus libero ultricies mauris.\n\n\tNunc et nisl in sapien vestibulum faucibus ut pellentesque sapien. Sed in felis id urna gravida elementum. Vestibulum feugiat arcu eu mi pellentesque convallis. Curabitur tempor, massa sed ornare bibendum, nulla velit laoreet elit, vel scelerisque turpis mi scelerisque leo. Phasellus pulvinar vel mauris sed sollicitudin. Vestibulum quis commodo nisi. Proin semper tellus dolor, nec porta sem mattis et.\n\n\ttIn egestas dolor luctus dolor malesuada, id finibus ex blandit. Sed varius vestibulum metus eget cursus. Suspendisse in dui posuere, tincidunt dolor at, pharetra arcu. Morbi maximus odio in faucibus auctor. Ut in laoreet justo. Integer eu leo ut ipsum interdum aliquam eu eget quam. Aliquam non velit vestibulum, accumsan elit ut, porttitor massa. Fusce eleifend convallis ex, vitae vestibulum elit fringilla in. Nunc sit amet tellus id ex eleifend pharetra. Integer id faucibus ex. Integer in mi sit amet augue mattis venenatis ac quis turpis. Nulla lacus risus, placerat ut sem non, feugiat convallis metus. Nam eu pulvinar orci. Vivamus eget leo in est efficitur fermentum vel sit amet eros.\n\n\tPellentesque sapien eros, scelerisque in nulla sit amet, commodo rhoncus nunc. Mauris eget pharetra justo. Integer sem mi, finibus fringilla dictum in, sollicitudin posuere magna. In ullamcorper elit quis velit scelerisque maximus. In pulvinar metus eu lorem maximus imperdiet. Aliquam vulputate elit at nunc elementum consectetur. Suspendisse mauris nulla, semper eget facilisis ut, pellentesque eu turpis.\n\n\tEtiam placerat mi et vehicula dictum. Nulla eu sagittis mi. Nullam efficitur interdum vulputate. Cras eu metus in enim tristique vulputate. Phasellus sit amet bibendum quam. Pellentesque est nibh, feugiat et venenatis id, scelerisque vel eros. Donec pretium, leo ac sagittis pulvinar, nunc mi iaculis lorem, et sollicitudin arcu nulla et nisi. Vestibulum a sem vitae nibh bibendum dictum a eu ipsum. Nulla placerat sapien eget massa vehicula aliquet. Donec id ante eu leo ullamcorper porta nec sit amet nisi. "
+LOREM_IPSUM :: "Lorem ipsum dolor sit amet, consectetur adipiscing elit. Quisque non convallis purus. Mauris iaculis rhoncus lobortis. Donec ac porttitor lectus, ut ullamcorper turpis. Etiam purus nulla, tincidunt ac fermentum vel, pharetra vel nisi. Aliquam egestas molestie ipsum a condimentum. Curabitur volutpat justo gravida, maximus massa ut, euismod mauris. Ut imperdiet, odio non laoreet tincidunt, leo enim mattis lectus, et volutpat purus libero ultricies mauris.\n\n\tNunc et nisl in sapien vestibulum faucibus ut pellentesque sapien. Sed in felis id urna gravida elementum. Vestibulum feugiat arcu eu mi pellentesque convallis. Curabitur tempor, massa sed ornare bibendum, nulla velit laoreet elit, vel scelerisque turpis mi scelerisque leo. Phasellus pulvinar vel mauris sed sollicitudin. Vestibulum quis commodo nisi. Proin semper tellus dolor, nec porta sem mattis et.\n\n\tIn egestas dolor luctus dolor malesuada, id finibus ex blandit. Sed varius vestibulum metus eget cursus. Suspendisse in dui posuere, tincidunt dolor at, pharetra arcu. Morbi maximus odio in faucibus auctor. Ut in laoreet justo. Integer eu leo ut ipsum interdum aliquam eu eget quam. Aliquam non velit vestibulum, accumsan elit ut, porttitor massa. Fusce eleifend convallis ex, vitae vestibulum elit fringilla in. Nunc sit amet tellus id ex eleifend pharetra. Integer id faucibus ex. Integer in mi sit amet augue mattis venenatis ac quis turpis. Nulla lacus risus, placerat ut sem non, feugiat convallis metus. Nam eu pulvinar orci. Vivamus eget leo in est efficitur fermentum vel sit amet eros.\n\n\tPellentesque sapien eros, scelerisque in nulla sit amet, commodo rhoncus nunc. Mauris eget pharetra justo. Integer sem mi, finibus fringilla dictum in, sollicitudin posuere magna. In ullamcorper elit quis velit scelerisque maximus. In pulvinar metus eu lorem maximus imperdiet. Aliquam vulputate elit at nunc elementum consectetur. Suspendisse mauris nulla, semper eget facilisis ut, pellentesque eu turpis.\n\n\tEtiam placerat mi et vehicula dictum. Nulla eu sagittis mi. Nullam efficitur interdum vulputate. Cras eu metus in enim tristique vulputate. Phasellus sit amet bibendum quam. Pellentesque est nibh, feugiat et venenatis id, scelerisque vel eros. Donec pretium, leo ac sagittis pulvinar, nunc mi iaculis lorem, et sollicitudin arcu nulla et nisi. Vestibulum a sem vitae nibh bibendum dictum a eu ipsum. Nulla placerat sapien eget massa vehicula aliquet. Donec id ante eu leo ullamcorper porta nec sit amet nisi. "

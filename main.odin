@@ -36,7 +36,7 @@ gui_run :: proc(gi: ^gui.Gui, should_exit: ^bool) {
 	gui.text(gi, "hello world!")
 	gui.end_div(gi)
 	gui.begin_scrollbox(gi, true)
-	for i in 0 ..< 1000 {
+	for i in 0 ..< 100 {
 		gui.text(gi, "HELLO WORLD!")
 		if gui.button(gi, fmt.tprintf("exit:%d", i), idx = i) {
 			should_exit^ = true
@@ -45,7 +45,7 @@ gui_run :: proc(gi: ^gui.Gui, should_exit: ^bool) {
 	}
 	gui.end_scrollbox(gi)
 	gui.begin_scrollbox(gi)
-	for i in 0 ..< 1000 {
+	for i in 0 ..< 100 {
 		gui.text(gi, fmt.tprintf("%s :%d", gui.LOREM_IPSUM, i))
 		if gui.button(gi, fmt.tprintf("TESTING 1 2 3 exit:%d", i), idx = i) {
 			should_exit^ = true
