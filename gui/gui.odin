@@ -2,6 +2,7 @@ package gui
 import "base:runtime"
 import "core:fmt"
 import "core:mem"
+import "core:slice"
 import "core:strings"
 import "core:unicode/utf8"
 import "vendor:raylib"
@@ -58,12 +59,12 @@ Widget :: struct {
 	base_text_height:    i32,
 	image_name:          string,
 	children:            [dynamic]^Widget,
-	custom_render:       proc(this: ^Widget),
-	destructor:          proc(this: ^Widget),
+	custom_render:       proc(this: ^Widget, gui: ^Gui, data: ^CachedWidgetData, frame_time: f64),
 	is_leaf:             bool,
 	scroll_box_reversed: bool,
 	container_kind:      ContainerKind,
 }
+
 
 CachedWidgetData :: struct {
 	bounds:               Boundary,
@@ -71,6 +72,8 @@ CachedWidgetData :: struct {
 	scroll_amount:        i32,
 	selected:             bool,
 	was_drawn_this_frame: bool,
+	frame_time:           f64,
+	user_data:            [32]u8,
 }
 
 InputData :: struct {
@@ -85,22 +88,38 @@ InputData :: struct {
 	right_mouse_down:     bool,
 	right_mouse_pressed:  bool,
 	right_mouse_released: bool,
+	mouse_wheel_delta:    f32,
+}
+
+MeasureTextCacheKey :: struct {
+	text:        string,
+	text_height: i32,
+	max_width:   i32,
+}
+
+MeasureTextCacheValue :: struct {
+	width:          i32,
+	height:         i32,
+	hit_this_frame: bool,
 }
 
 Gui :: struct {
-	bounds:            Boundary,
-	root:              ^Widget,
-	current_widget:    ^Widget,
-	prev_widget_stack: [dynamic]^Widget,
-	current_style:     ^WidgetStyle,
-	prev_style_stack:  [dynamic]^WidgetStyle,
-	arena:             mem.Dynamic_Arena,
-	alloc:             mem.Allocator,
-	data_table:        map[WidgetId]CachedWidgetData,
-	font:              raylib.Font,
-	input_data:        InputData,
-	default_style:     WidgetStyle,
-	frame_over:        bool,
+	bounds:             Boundary,
+	root:               ^Widget,
+	panels:             [dynamic]^Widget,
+	current_widget:     ^Widget,
+	prev_widget_stack:  [dynamic]^Widget,
+	current_style:      ^WidgetStyle,
+	prev_style_stack:   [dynamic]^WidgetStyle,
+	arena:              mem.Dynamic_Arena,
+	alloc:              mem.Allocator,
+	data_table:         map[WidgetId]CachedWidgetData,
+	font:               raylib.Font,
+	input_data:         InputData,
+	default_style:      WidgetStyle,
+	frame_over:         bool,
+	measure_text_cache: map[MeasureTextCacheKey]MeasureTextCacheValue,
+	using_default_font: bool,
 }
 
 make_widget_id :: proc(text: string, loc: runtime.Source_Code_Location, idx: int) -> WidgetId {
@@ -117,14 +136,19 @@ FONT_DATA: []u8 = #load("../Ac437_IBM_VGA_9x16.ttf")
 create_gui :: proc(x: i32, y: i32, width: i32, height: i32) -> ^Gui {
 	out := new(Gui)
 	out.bounds = {x, y, width, height}
-	out.font = raylib.LoadFontFromMemory(
-		".ttf",
-		&FONT_DATA[0],
-		cast(i32)len(FONT_DATA),
-		16,
-		nil,
-		0,
-	)
+	out.using_default_font = true
+	if !out.using_default_font {
+		out.font = raylib.LoadFontFromMemory(
+			".ttf",
+			&FONT_DATA[0],
+			cast(i32)len(FONT_DATA),
+			16,
+			nil,
+			0,
+		)
+	} else {
+		out.font = raylib.GetFontDefault()
+	}
 	mem.dynamic_arena_init(&out.arena)
 	out.alloc = mem.dynamic_arena_allocator(&out.arena)
 	out.current_style = nil
@@ -142,6 +166,14 @@ destroy_gui :: proc(this: ^Gui) {
 	delete(this.data_table)
 	delete(this.prev_style_stack)
 	delete(this.prev_widget_stack)
+	delete(this.panels)
+	for i in this.measure_text_cache {
+		delete(i.text)
+	}
+	delete(this.measure_text_cache)
+	if !this.using_default_font {
+		raylib.UnloadFont(this.font)
+	}
 	free(this)
 }
 
@@ -159,9 +191,10 @@ create_default_style :: proc() -> WidgetStyle {
 	return out
 }
 
-gui_begin_frame :: proc(this: ^Gui) {
+gui_begin_frame :: proc(this: ^Gui, create_root := true) {
 	clear(&this.prev_widget_stack)
 	clear(&this.prev_style_stack)
+	clear(&this.panels)
 	mem.dynamic_arena_free_all(&this.arena)
 	{
 		this.input_data.input_char = raylib.GetCharPressed()
@@ -175,16 +208,27 @@ gui_begin_frame :: proc(this: ^Gui) {
 		this.input_data.mouse_dy = raylib.GetMouseDelta().y
 		this.input_data.mouse_x = raylib.GetMouseX()
 		this.input_data.mouse_y = raylib.GetMouseY()
+		this.input_data.mouse_wheel_delta = raylib.GetMouseWheelMoveV().y
 	}
 	{
 		this.current_style = new_clone(this.default_style, this.alloc)
-		root := create_widget(this, .Container, "ROOT")
-		root.container_kind = .HorizontalContainer
-		root.bounds = this.bounds
-		this.root = root
-		this.current_widget = root
+		if create_root {
+			root := create_widget(this, .Container, "ROOT")
+			root.container_kind = .HorizontalContainer
+			root.bounds = this.bounds
+			this.root = root
+			this.current_widget = root
+		} else {
+			this.root = nil
+			this.current_widget = nil
+		}
 	}
 	this.frame_over = false
+	{
+		for key, &value in this.measure_text_cache {
+			value.hit_this_frame = false
+		}
+	}
 }
 create_widget :: proc(
 	this: ^Gui,
@@ -203,6 +247,16 @@ create_widget :: proc(
 	return out
 }
 
+get_cached_widget_data :: proc(this: ^Gui, widget: ^Widget) -> ^CachedWidgetData {
+	if widget.id not_in this.data_table {
+		tmp := CachedWidgetData{}
+		tmp.bounds = this.bounds
+		tmp.was_drawn_this_frame = true
+		this.data_table[widget.id] = tmp
+	}
+	return &this.data_table[widget.id]
+}
+
 clone_string :: proc(this: ^Gui, text: string) -> string {
 	return strings.clone(text, this.alloc)
 }
@@ -215,6 +269,18 @@ gui_end_frame :: proc(this: ^Gui) {
 	gui_determine_layout(this)
 	gui_on_update(this)
 	this.frame_over = true
+	{
+		delete_set := make([dynamic]MeasureTextCacheKey)
+		for key, value in this.measure_text_cache {
+			if !value.hit_this_frame {
+				append(&delete_set, key)
+			}
+		}
+		for i in delete_set {
+			delete_key(&this.measure_text_cache, i)
+			delete(i.text)
+		}
+	}
 }
 
 gui_begin_style :: proc(this: ^Gui, style: WidgetStyle) {
@@ -251,20 +317,15 @@ button :: proc(
 	widget.base_text_height = widget.text_height
 	append(&this.current_widget.children, widget)
 	out := false
-	if widget.id in this.data_table {
-		data := &this.data_table[widget.id]
-		if data.selected {
-			if this.input_data.left_mouse_released &&
-			   this.input_data.mouse_x >= data.bounds.x &&
-			   this.input_data.mouse_y >= data.bounds.y &&
-			   this.input_data.mouse_x < data.bounds.x + data.bounds.width &&
-			   this.input_data.mouse_y < data.bounds.y + data.bounds.height {
-				out = true
-			}
+	data := get_cached_widget_data(this, widget)
+	if data.selected {
+		if this.input_data.left_mouse_released &&
+		   this.input_data.mouse_x >= data.bounds.x &&
+		   this.input_data.mouse_y >= data.bounds.y &&
+		   this.input_data.mouse_x < data.bounds.x + data.bounds.width &&
+		   this.input_data.mouse_y < data.bounds.y + data.bounds.height {
+			out = true
 		}
-	} else {
-		t_data: CachedWidgetData
-		this.data_table[widget.id] = t_data
 	}
 	return out
 }
@@ -285,20 +346,15 @@ button_thumbnail :: proc(
 	widget.base_text_height = widget.text_height
 	append(&this.current_widget.children, widget)
 	out := false
-	if widget.id in this.data_table {
-		data := &this.data_table[widget.id]
-		if data.selected {
-			if this.input_data.left_mouse_released &&
-			   this.input_data.mouse_x >= data.bounds.x &&
-			   this.input_data.mouse_y >= data.bounds.y &&
-			   this.input_data.mouse_x < data.bounds.x + data.bounds.width &&
-			   this.input_data.mouse_y < data.bounds.y + data.bounds.height {
-				out = true
-			}
+	data := get_cached_widget_data(this, widget)
+	if data.selected {
+		if this.input_data.left_mouse_released &&
+		   this.input_data.mouse_x >= data.bounds.x &&
+		   this.input_data.mouse_y >= data.bounds.y &&
+		   this.input_data.mouse_x < data.bounds.x + data.bounds.width &&
+		   this.input_data.mouse_y < data.bounds.y + data.bounds.height {
+			out = true
 		}
-	} else {
-		t_data: CachedWidgetData
-		this.data_table[widget.id] = t_data
 	}
 	return out
 }
@@ -332,6 +388,72 @@ end_div :: proc(this: ^Gui) {
 	gui_end_widget(this)
 }
 
+begin_panel :: proc(
+	this: ^Gui,
+	x, y, width, height: i32,
+	use_cached_bounds := false,
+	idx := 0,
+	id: string = "",
+	loc := #caller_location,
+) {
+	widget := create_widget(this, .Container, id, idx, loc)
+	widget.is_leaf = false
+	widget.bounds = {x, y, width, height}
+	if use_cached_bounds {
+		widget.bounds = get_cached_widget_data(this, widget).bounds
+	}
+	widget.container_kind = .VerticalContainer
+	append(&this.panels, widget)
+	gui_begin_widget(this, widget)
+}
+
+end_panel :: proc(this: ^Gui) {
+	gui_end_widget(this)
+}
+
+begin_panel_horizontal :: proc(
+	this: ^Gui,
+	x, y, width, height: i32,
+	use_cached_bounds: bool = false,
+	idx := 0,
+	id: string = "",
+	loc := #caller_location,
+) {
+	widget := create_widget(this, .Container, id, idx, loc)
+	widget.is_leaf = false
+	widget.bounds = {x, y, width, height}
+	if use_cached_bounds {
+		widget.bounds = get_cached_widget_data(this, widget).bounds
+	}
+	widget.container_kind = .HorizontalContainer
+	append(&this.panels, widget)
+	gui_begin_widget(this, widget)
+}
+
+end_panel_horizontal :: proc(this: ^Gui) {
+	gui_end_widget(this)
+}
+
+begin_panel_scrollbox :: proc(
+	this: ^Gui,
+	x, y, width, height: i32,
+	idx := 0,
+	id: string = "",
+	loc := #caller_location,
+) {
+	widget := create_widget(this, .Container, id, idx, loc)
+	widget.is_leaf = false
+	widget.bounds = {x, y, width, height}
+	widget.container_kind = .ScrollBox
+	append(&this.panels, widget)
+	gui_begin_widget(this, widget)
+}
+
+end_panel_scrollbox :: proc(this: ^Gui) {
+	gui_end_widget(this)
+}
+
+
 begin_scrollbox :: proc(
 	this: ^Gui,
 	reversed := false,
@@ -341,10 +463,6 @@ begin_scrollbox :: proc(
 ) {
 	widget := create_widget(this, .Container, id, idx, loc)
 	widget.is_leaf = false
-	if !(widget.id in this.data_table) {
-		t_data: CachedWidgetData
-		this.data_table[widget.id] = t_data
-	}
 	widget.container_kind = .ScrollBox
 	widget.scroll_box_reversed = reversed
 	append(&this.current_widget.children, widget)
@@ -370,7 +488,13 @@ end_horizontal_div :: proc(this: ^Gui) {
 gui_determine_layout :: proc(this: ^Gui) {
 	if this.root != nil {
 		gui_calculate_dimensions(this.root, this, this.bounds.width, this.bounds.height)
-		gui_build_layout(this.root, this, this.bounds.x, this.bounds.y)
+		shift_x := (this.bounds.width - this.root.bounds.width) / 2
+		shift_y := (this.bounds.height - this.root.bounds.height) / 2
+		gui_build_layout(this.root, this, this.bounds.x + shift_x, this.bounds.y + shift_y)
+	}
+	for i in this.panels {
+		gui_calculate_dimensions(i, this, i.bounds.width, i.bounds.height)
+		gui_build_layout(i, this, i.bounds.x, i.bounds.y)
 	}
 }
 
@@ -381,7 +505,6 @@ gui_build_layout :: proc(this: ^Widget, gui: ^Gui, base_x: i32, base_y: i32) {
 	base_x := base_x
 	base_y := base_y
 	if !this.is_leaf {
-
 		switch this.container_kind {
 		case .VerticalContainer:
 			{
@@ -426,42 +549,50 @@ gui_build_layout :: proc(this: ^Widget, gui: ^Gui, base_x: i32, base_y: i32) {
 				base_x += (this.bounds.width - this.style.padding * 2 - max_w) / 2
 				dy: i32 = this.style.padding
 				dx: i32 = this.style.padding
-				if !(this.id in gui.data_table) {
-					base := CachedWidgetData{}
-					base.bounds = this.bounds
-					base.scroll_amount = 0
-					base.scroll_height = 0
-					base.selected = false
-				}
-				data := &gui.data_table[this.id]
+				data := get_cached_widget_data(gui, this)
 				data.scroll_height = this.style.padding
+				data.scroll_height = 0
+				for i in this.children {
+					data.scroll_height += i.bounds.height + this.style.padding
+				}
 				if data.scroll_amount > data.scroll_height {
 					data.scroll_amount = data.scroll_height
 				}
 				if data.scroll_amount < 0 {
 					data.scroll_amount = 0
 				}
-				for i in this.children {
-					data.scroll_height += i.bounds.height + this.style.padding
-				}
 				base_y := this.bounds.y + this.style.padding
 				if this.scroll_box_reversed {
 					base_y =
-						this.bounds.y +
-						this.bounds.height -
-						this.style.padding -
-						data.scroll_height
+						this.bounds.y -
+						data.scroll_height +
+						this.style.padding +
+						+this.bounds.height +
+						data.scroll_amount -
+						(this.style.padding * cast(i32)len(this.children))
 					if len(this.children) > 0 {
-						base_y -= this.children[len(this.children) - 1].bounds.height
+						base_y += this.children[0].bounds.height
 					}
-				}
-				for i in this.children {
-					gui_build_layout(i, gui, base_x + dx, base_y + dy)
-					dy += i.bounds.height + this.style.padding
+					for idx in 1 ..= len(this.children) {
+						i := this.children[len(this.children) - idx]
+						gui_build_layout(i, gui, base_x + dx, base_y + dy)
+						dy += i.bounds.height + this.style.padding * 2
+					}
+				} else {
+					base_y -= data.scroll_amount
+					if len(this.children) > 0 {
+						base_y += this.children[len(this.children) - 1].bounds.height
+					}
+					for i in this.children {
+						gui_build_layout(i, gui, base_x + dx, base_y + dy)
+						dy += i.bounds.height + this.style.padding * 2
+					}
 				}
 			}
 		}
 	}
+	tmp := get_cached_widget_data(gui, this)
+	tmp.bounds = this.bounds
 }
 
 gui_calculate_dimensions :: proc(
@@ -495,8 +626,8 @@ gui_calculate_dimensions :: proc(
 					}
 					this.text_height -= 1
 				}
-				assert(this.bounds.width < max_width, "width< max_width")
-				assert(this.bounds.height < max_height, "height< max_height")
+				assert(this.bounds.width <= width_base, "width< max_width")
+				assert(this.bounds.height <= height_base, "height< max_height")
 			}
 		case .Text:
 			this.text_height = this.base_text_height
@@ -514,8 +645,8 @@ gui_calculate_dimensions :: proc(
 				}
 				this.text_height -= 1
 			}
-			assert(this.bounds.width < max_width, "width< max_width")
-			assert(this.bounds.height < max_height, "height< max_height")
+			assert(this.bounds.width <= width_base, "width< max_width")
+			assert(this.bounds.height <= height_base, "height< max_height")
 		case .Button:
 			this.text_height = this.base_text_height
 			for this.text_height >= 12 {
@@ -532,8 +663,8 @@ gui_calculate_dimensions :: proc(
 				}
 				this.text_height -= 1
 			}
-			assert(this.bounds.width < width_base, "width< max_width")
-			assert(this.bounds.height < height_base, "height< max_height")
+			assert(this.bounds.width <= width_base, "width<= max_width")
+			assert(this.bounds.height <= height_base, "height< max_height")
 		case .ButtonThumbNail:
 			for this.text_height >= 12 {
 				width, height := measure_text_given_width(
@@ -549,8 +680,8 @@ gui_calculate_dimensions :: proc(
 				}
 				this.text_height -= 1
 			}
-			assert(this.bounds.width < width_base, "width< max_width")
-			assert(this.bounds.height < height_base, "height< max_height")
+			assert(this.bounds.width <= width_base, "width< max_width")
+			assert(this.bounds.height <= height_base, "height< max_height")
 		case .Image:
 			this.bounds.height = max_height
 			this.bounds.width = max_width
@@ -586,10 +717,12 @@ gui_calculate_dimensions :: proc(
 						if l == 0 {
 							l = 1
 						}
-						if disp < l {
-							guess_max_height -= 1
+						if disp > 100 {
+							guess_max_height -= disp / l
+						} else if disp > 10 {
+							guess_max_height -= 2
 						} else {
-							guess_max_height -= disp / 2
+							guess_max_height -= 1
 						}
 					}
 				}
@@ -597,13 +730,18 @@ gui_calculate_dimensions :: proc(
 		case .HorizontalContainer:
 			{
 				guess_max_width := max_width - this.style.padding * 2
+				extra_width: i32 = 0
 				for {
 					dx: i32 = 0
 					dy: i32 = this.style.padding
 					t_max_width := guess_max_width
 					t_max_height := max_height - this.style.padding * 2
 					for i in this.children {
-						gui_calculate_dimensions(i, gui, t_max_width, t_max_height)
+						tm := extra_width if extra_width > 0 else 0
+						if extra_width > 0 {
+							extra_width -= 1
+						}
+						gui_calculate_dimensions(i, gui, t_max_width + tm, t_max_height)
 						if i.bounds.height + this.style.padding * 2 > dy {
 							dy = i.bounds.height + this.style.padding * 2
 						}
@@ -619,10 +757,12 @@ gui_calculate_dimensions :: proc(
 						if l == 0 {
 							l = 1
 						}
-						if disp < l {
-							guess_max_width -= 1
+						if disp > 100 {
+							guess_max_width -= disp / l
+						} else if disp > 10 {
+							guess_max_width -= 2
 						} else {
-							guess_max_width -= disp / 2
+							guess_max_width -= 1
 						}
 					}
 				}
@@ -630,16 +770,30 @@ gui_calculate_dimensions :: proc(
 		case .ScrollBox:
 			this.bounds.width = max_width
 			this.bounds.height = max_height
-			guess_max_height := max_height - this.style.padding * 2
+			guess_max_height: i32 = 2 << 16
 			guess_max_width := max_width - this.style.padding * 2
 			tmax_height := guess_max_height
 			for i in this.children {
 				gui_calculate_dimensions(i, gui, guess_max_width, guess_max_height)
 			}
+			mx_x: i32 = 0
+			for i in this.children {
+				if i.bounds.width + this.style.padding * 2 > mx_x {
+					mx_x = i.bounds.width + this.style.padding
+				}
+			}
+			if this.bounds.width > 4 * mx_x {
+				this.bounds.width = 4 * mx_x
+			}
 		}
-		assert(this.bounds.width < max_width, "width< max_width")
-		assert(this.bounds.height < max_height, "height< max_height")
+		assert(this.bounds.width <= max_width, "width< max_width")
+		assert(this.bounds.height <= max_height, "height< max_height")
 	}
+	/*if this.bounds.width <= max_width {
+		cond_nv :=
+			max_width - this.style.padding * 4 if this.bounds.width * 2 > max_width - this.style.padding * 4 else this.bounds.width * 2
+		this.bounds.width = cond_nv
+	}*/
 
 }
 
@@ -654,42 +808,86 @@ gui_render :: proc(this: ^Gui) {
 	if this.root != nil {
 		gui_render_widget(this.root, this)
 	}
+	for i in this.panels {
+		gui_render_widget(i, this)
+	}
+}
+
+render_image :: proc(img: string, x: i32, y: i32, width: i32, height: i32, gui: ^Gui) {
+	raylib.DrawRectangle(x, y, width, height, raylib.VIOLET)
+}
+
+render_text :: proc(this: ^Widget, gui: ^Gui, x_off: i32 = 0, y_off: i32 = 0) {
+	txt, _, _ := split_text_given_width(
+		gui,
+		this.text,
+		this.text_height,
+		this.bounds.width - this.style.padding * 2,
+	)
+	defer (delete(txt))
+	dy: i32 = this.style.padding + this.bounds.y + y_off
+	dx: i32 = this.style.padding + this.bounds.x + x_off
+	for i in txt {
+		pos := raylib.Vector2{cast(f32)dx, cast(f32)dy}
+		raylib.DrawTextEx(
+			gui.font,
+			fmt.ctprintf("%s", i),
+			pos,
+			cast(f32)this.text_height,
+			1.,
+			this.style.text_color,
+		)
+		dy += this.text_height
+	}
 }
 
 gui_render_widget :: proc(this: ^Widget, gui: ^Gui) {
-	render_image :: proc(img: string, x: i32, y: i32, width: i32, height: i32, gui: ^Gui) {
-		raylib.DrawRectangle(x, y, width, height, raylib.VIOLET)
-	}
-	render_text :: proc(this: ^Widget, gui: ^Gui, x_off: i32 = 0, y_off: i32 = 0) {
-		txt, _, _ := split_text_given_width(
-			gui,
-			this.text,
-			this.text_height,
-			this.bounds.width - this.style.padding * 2,
-		)
-		defer (delete(txt))
-		dy: i32 = this.style.padding + this.bounds.y + y_off
-		dx: i32 = this.style.padding + this.bounds.x + x_off
-		for i in txt {
-			pos := raylib.Vector2{cast(f32)dx, cast(f32)dy}
-			raylib.DrawTextEx(
-				gui.font,
-				fmt.ctprintf("%s", i),
-				pos,
-				cast(f32)this.text_height,
-				1.,
-				this.style.text_color,
-			)
-			dy += this.text_height
-		}
-	}
-	switch this.type {
-	case .Text:
-		{
-			render_text(this, gui)
-		}
-	case .TextInput:
-		{
+
+	if this.custom_render == nil {
+		switch this.type {
+		case .Text:
+			{
+				render_text(this, gui)
+			}
+		case .TextInput:
+			{
+				selected := gui.data_table[this.id].selected
+				raylib.DrawRectangle(
+					this.bounds.x - 2,
+					this.bounds.y - 2,
+					this.bounds.width + 4,
+					this.bounds.height + 4,
+					this.style.border_color,
+				)
+				raylib.DrawRectangle(
+					this.bounds.x,
+					this.bounds.y,
+					this.bounds.width,
+					this.bounds.height,
+					this.style.widget_color if !selected else this.style.selected_widget_color,
+				)
+				render_text(this, gui)
+			}
+		case .Button:
+			{
+				selected := gui.data_table[this.id].selected
+				raylib.DrawRectangle(
+					this.bounds.x - 2,
+					this.bounds.y - 2,
+					this.bounds.width + 4,
+					this.bounds.height + 4,
+					this.style.border_color,
+				)
+				raylib.DrawRectangle(
+					this.bounds.x,
+					this.bounds.y,
+					this.bounds.width,
+					this.bounds.height,
+					this.style.widget_color if !selected else this.style.selected_widget_color,
+				)
+				render_text(this, gui)
+			}
+		case .ButtonThumbNail:
 			selected := gui.data_table[this.id].selected
 			raylib.DrawRectangle(
 				this.bounds.x - 2,
@@ -705,11 +903,25 @@ gui_render_widget :: proc(this: ^Widget, gui: ^Gui) {
 				this.bounds.height,
 				this.style.widget_color if !selected else this.style.selected_widget_color,
 			)
-			render_text(this, gui)
-		}
-	case .Button:
-		{
-			selected := gui.data_table[this.id].selected
+			render_image(
+				this.image_name,
+				this.bounds.x + this.style.padding,
+				this.bounds.y + this.style.padding,
+				this.text_height,
+				this.text_height,
+				gui,
+			)
+			render_text(this, gui, this.text_height * 2)
+		case .Image:
+			render_image(
+				this.image_name,
+				this.bounds.x,
+				this.bounds.y,
+				this.bounds.width,
+				this.bounds.height,
+				gui,
+			)
+		case .Container:
 			raylib.DrawRectangle(
 				this.bounds.x - 2,
 				this.bounds.y - 2,
@@ -722,64 +934,47 @@ gui_render_widget :: proc(this: ^Widget, gui: ^Gui) {
 				this.bounds.y,
 				this.bounds.width,
 				this.bounds.height,
-				this.style.widget_color if !selected else this.style.selected_widget_color,
+				this.style.background_color,
 			)
-			render_text(this, gui)
+			if this.container_kind == .ScrollBox {
+				raylib.BeginScissorMode(
+					this.bounds.x,
+					this.bounds.y,
+					this.bounds.width,
+					this.bounds.height,
+				)
+			}
+			p_bds := raylib.Rectangle {
+				cast(f32)this.bounds.x,
+				cast(f32)this.bounds.y,
+				cast(f32)this.bounds.width,
+				cast(f32)this.bounds.height,
+			}
+			for i in this.children {
+				bds := raylib.Rectangle {
+					cast(f32)i.bounds.x,
+					cast(f32)i.bounds.y,
+					cast(f32)i.bounds.width,
+					cast(f32)i.bounds.height,
+				}
+				if raylib.CheckCollisionRecs(p_bds, bds) {
+					gui_render_widget(i, gui)
+				}
+			}
+			if this.container_kind == .ScrollBox {
+				raylib.EndScissorMode()
+			}
+
+		case .None:
+			assert(false)
 		}
-	case .ButtonThumbNail:
-		selected := gui.data_table[this.id].selected
-		raylib.DrawRectangle(
-			this.bounds.x - 2,
-			this.bounds.y - 2,
-			this.bounds.width + 4,
-			this.bounds.height + 4,
-			this.style.border_color,
-		)
-		raylib.DrawRectangle(
-			this.bounds.x,
-			this.bounds.y,
-			this.bounds.width,
-			this.bounds.height,
-			this.style.widget_color if !selected else this.style.selected_widget_color,
-		)
-		render_image(
-			this.image_name,
-			this.bounds.x + this.style.padding,
-			this.bounds.y + this.style.padding,
-			this.text_height,
-			this.text_height,
-			gui,
-		)
-		render_text(this, gui, this.text_height * 2)
-	case .Image:
-		render_image(
-			this.image_name,
-			this.bounds.x,
-			this.bounds.y,
-			this.bounds.width,
-			this.bounds.height,
-			gui,
-		)
-	case .Container:
-		raylib.DrawRectangle(
-			this.bounds.x - 2,
-			this.bounds.y - 2,
-			this.bounds.width + 4,
-			this.bounds.height + 4,
-			this.style.border_color,
-		)
-		raylib.DrawRectangle(
-			this.bounds.x,
-			this.bounds.y,
-			this.bounds.width,
-			this.bounds.height,
-			this.style.background_color,
-		)
-		for i in this.children {
-			gui_render_widget(i, gui)
+	} else {
+		ptr: ^CachedWidgetData = nil
+		if this.id in gui.data_table {
+			ptr = &gui.data_table[this.id]
 		}
-	case .None:
-		assert(false)
+		ft := cast(f64)raylib.GetFrameTime()
+		this.custom_render(this, gui, ptr, ft)
 	}
 }
 
@@ -813,7 +1008,7 @@ gui_on_update :: proc(this: ^Gui) {
 			} else {
 				tmp.selected = false
 				if this.container_kind == .ScrollBox && mouse_intersecting {
-					tmp.scroll_amount -= cast(i32)gui.input_data.mouse_dy
+					tmp.scroll_amount -= cast(i32)(gui.input_data.mouse_wheel_delta * 2.)
 					if tmp.scroll_amount < 0 {
 						tmp.scroll_amount = 0
 					} else if tmp.scroll_amount > tmp.scroll_height {
@@ -831,6 +1026,9 @@ gui_on_update :: proc(this: ^Gui) {
 	}
 	if this.root != nil {
 		gui_update_widget(this.root, this)
+	}
+	for i in this.panels {
+		gui_update_widget(i, this)
 	}
 	delete_count_set := make([dynamic]WidgetId)
 	defer delete(delete_count_set)
@@ -852,40 +1050,66 @@ measure_text_given_width :: proc(
 ) -> (
 	width, height: i32,
 ) {
+	key := MeasureTextCacheKey{strings.clone(text), text_height, max_width}
+	if key in this.measure_text_cache {
+		tmp := &this.measure_text_cache[key]
+		delete(key.text)
+		tmp.hit_this_frame = true
+		width = tmp.width
+		height = tmp.height
+		return
+	}
 	dy: i32 = 0
 	max_dx: i32 = 0
 	base_idx := 0
 	dx: i32 = 0
 	text_height_f := cast(f32)text_height
+	tmp_buffer := make_slice([]u8, len(text) + 1)
+	defer delete(tmp_buffer)
+	tmp_buffer_idx := 0
 	for i, idx in text {
 		byte_count := utf8.rune_size(i)
 		if i == '\n' {
-			base_idx = idx + byte_count
-			dy += 1
-			dx = 0
 			sz := cast([2]i32)raylib.MeasureTextEx(
 				this.font,
 				fmt.ctprintf("%s", text[base_idx:idx]),
 				cast(f32)text_height,
 				1,
 			)
+			base_idx = idx + byte_count
+			dy += 1
+			dx = 0
 			if sz.x > max_dx {
 				max_dx = sz.x
 			}
+			mem.set(&tmp_buffer[0], 0, len(tmp_buffer))
+			tmp_buffer_idx = 0
 		} else {
+			{
+				for j in idx ..< idx + byte_count {
+					tmp_buffer[tmp_buffer_idx] = text[j]
+					tmp_buffer_idx += 1
+				}
+			}
 			sz := cast([2]i32)raylib.MeasureTextEx(
 				this.font,
-				fmt.ctprintf("%s", text[base_idx:idx + byte_count]),
+				transmute(cstring)&tmp_buffer[0],
 				cast(f32)text_height,
 				1,
 			)
-			dx = sz.x
-			if sz.x >= max_width {
-				base_idx = idx
-				dy += 1
-			}
 			if sz.x > max_dx {
 				max_dx = sz.x
+			}
+			dx = cast(i32)sz.x
+			if dx > max_width {
+				base_idx = idx
+				dy += 1
+				dx = 0
+				tmp_buffer_idx = 0
+				mem.set(&tmp_buffer[0], 0, len(tmp_buffer))
+			}
+			if dx > max_dx {
+				max_dx = dx
 			}
 		}
 	}
@@ -902,6 +1126,7 @@ measure_text_given_width :: proc(
 	}
 	width = max_dx
 	height = (dy + 1) * text_height
+	this.measure_text_cache[key] = {width, height, true}
 	return
 }
 
@@ -925,6 +1150,9 @@ split_text_given_width :: proc(
 	base_idx := 0
 	dx: i32 = 0
 	text_height_f := cast(f32)text_height
+	tmp_buffer := make_slice([]u8, len(text) + 1)
+	defer delete(tmp_buffer)
+	tmp_buffer_idx := 0
 	for i, idx in text {
 		byte_count := utf8.rune_size(i)
 		if i == '\n' {
@@ -942,22 +1170,36 @@ split_text_given_width :: proc(
 			base_idx = idx + byte_count
 			dy += 1
 			dx = 0
+			mem.set(&tmp_buffer[0], 0, len(tmp_buffer))
+			tmp_buffer_idx = 0
 		} else {
+			{
+				for j in idx ..< idx + byte_count {
+					tmp_buffer[tmp_buffer_idx] = text[j]
+					tmp_buffer_idx += 1
+				}
+			}
 			sz := cast([2]i32)raylib.MeasureTextEx(
 				this.font,
-				fmt.ctprintf("%s", text[base_idx:idx + byte_count]),
+				transmute(cstring)&tmp_buffer[0],
 				cast(f32)text_height,
 				1,
 			)
-			dx = sz.x
-			if sz.x > max_width {
+			if sz.x > max_dx {
+				max_dx = sz.x
+			}
+			dx = cast(i32)sz.x
+			if dx > max_width {
 				s := text[base_idx:idx]
 				append(&lines, s)
 				base_idx = idx
 				dy += 1
+				dx = 0
+				mem.set(&tmp_buffer[0], 0, len(tmp_buffer))
+				tmp_buffer_idx = 0
 			}
-			if sz.x > max_dx {
-				max_dx = sz.x
+			if dx > max_dx {
+				max_dx = dx
 			}
 		}
 	}
@@ -978,3 +1220,5 @@ split_text_given_width :: proc(
 	height = (dy + 1) * text_height
 	return
 }
+
+LOREM_IPSUM :: "Lorem ipsum dolor sit amet, consectetur adipiscing elit. Quisque non convallis purus. Mauris iaculis rhoncus lobortis. Donec ac porttitor lectus, ut ullamcorper turpis. Etiam purus nulla, tincidunt ac fermentum vel, pharetra vel nisi. Aliquam egestas molestie ipsum a condimentum. Curabitur volutpat justo gravida, maximus massa ut, euismod mauris. Ut imperdiet, odio non laoreet tincidunt, leo enim mattis lectus, et volutpat purus libero ultricies mauris.\n\n\tNunc et nisl in sapien vestibulum faucibus ut pellentesque sapien. Sed in felis id urna gravida elementum. Vestibulum feugiat arcu eu mi pellentesque convallis. Curabitur tempor, massa sed ornare bibendum, nulla velit laoreet elit, vel scelerisque turpis mi scelerisque leo. Phasellus pulvinar vel mauris sed sollicitudin. Vestibulum quis commodo nisi. Proin semper tellus dolor, nec porta sem mattis et.\n\n\ttIn egestas dolor luctus dolor malesuada, id finibus ex blandit. Sed varius vestibulum metus eget cursus. Suspendisse in dui posuere, tincidunt dolor at, pharetra arcu. Morbi maximus odio in faucibus auctor. Ut in laoreet justo. Integer eu leo ut ipsum interdum aliquam eu eget quam. Aliquam non velit vestibulum, accumsan elit ut, porttitor massa. Fusce eleifend convallis ex, vitae vestibulum elit fringilla in. Nunc sit amet tellus id ex eleifend pharetra. Integer id faucibus ex. Integer in mi sit amet augue mattis venenatis ac quis turpis. Nulla lacus risus, placerat ut sem non, feugiat convallis metus. Nam eu pulvinar orci. Vivamus eget leo in est efficitur fermentum vel sit amet eros.\n\n\tPellentesque sapien eros, scelerisque in nulla sit amet, commodo rhoncus nunc. Mauris eget pharetra justo. Integer sem mi, finibus fringilla dictum in, sollicitudin posuere magna. In ullamcorper elit quis velit scelerisque maximus. In pulvinar metus eu lorem maximus imperdiet. Aliquam vulputate elit at nunc elementum consectetur. Suspendisse mauris nulla, semper eget facilisis ut, pellentesque eu turpis.\n\n\tEtiam placerat mi et vehicula dictum. Nulla eu sagittis mi. Nullam efficitur interdum vulputate. Cras eu metus in enim tristique vulputate. Phasellus sit amet bibendum quam. Pellentesque est nibh, feugiat et venenatis id, scelerisque vel eros. Donec pretium, leo ac sagittis pulvinar, nunc mi iaculis lorem, et sollicitudin arcu nulla et nisi. Vestibulum a sem vitae nibh bibendum dictum a eu ipsum. Nulla placerat sapien eget massa vehicula aliquet. Donec id ante eu leo ullamcorper porta nec sit amet nisi. "
