@@ -16,14 +16,10 @@ Boundary :: struct {
 	x, y, width, height: i32,
 }
 
-DefaultWidgetId :: struct {
-	loc: runtime.Source_Code_Location,
-	idx: int,
-}
-
-WidgetId :: union {
-	string,
-	DefaultWidgetId,
+WidgetId :: struct {
+	name: string,
+	loc:  runtime.Source_Code_Location,
+	idx:  int,
 }
 
 
@@ -31,12 +27,13 @@ WidgetStyle :: struct {
 	smol_text:             i32,
 	normal_text_size:      i32,
 	large_text_size:       i32,
+	padding:               i32,
 	background_color:      Color,
 	border_color:          Color,
 	text_color:            Color,
 	widget_color:          Color,
 	selected_widget_color: Color,
-	padding:               i32,
+	rounded_corners:       bool,
 }
 
 ContainerKind :: enum {
@@ -59,6 +56,8 @@ Widget :: struct {
 	id:                  WidgetId,
 	type:                WidgetType,
 	bounds:              Boundary,
+	max_width:           i32,
+	max_height:          i32,
 	style:               ^WidgetStyle,
 	text:                string,
 	text_height:         i32,
@@ -69,12 +68,13 @@ Widget :: struct {
 	is_leaf:             bool,
 	scroll_box_reversed: bool,
 	container_kind:      ContainerKind,
+	tool_tip_text:       string,
 }
 
 
 CachedWidgetData :: struct {
 	frame_time:             f64,
-	cached_text:            string,
+	text_input:             strings.Builder,
 	bounds:                 Boundary,
 	scroll_height:          i32,
 	scroll_amount:          i32,
@@ -82,6 +82,7 @@ CachedWidgetData :: struct {
 	guess_max_child_width:  i32,
 	selected:               bool,
 	was_drawn_this_frame:   bool,
+	text_input_cursor:      int,
 }
 
 InputData :: struct {
@@ -132,14 +133,11 @@ Gui :: struct {
 	using_default_font:                         bool,
 	debug_calculate_dimension_count:            int,
 	debug_calculate_dimension_lock_yeah_i_know: sync.Mutex,
+	image_table:                                map[string]raylib.Texture2D,
 }
 
 make_widget_id :: proc(text: string, loc: runtime.Source_Code_Location, idx: int) -> WidgetId {
-	if text != "" {
-		return text
-	} else {
-		return DefaultWidgetId{loc, idx}
-	}
+	return WidgetId{text, loc, idx}
 }
 
 @(rodata)
@@ -151,7 +149,7 @@ create_gui :: proc(
 	width: i32,
 	height: i32,
 	use_default_font := false,
-	can_be_multithreaded := true,
+	can_be_multithreaded := false,
 ) -> ^Gui {
 	out := new(Gui)
 	out.bounds = {x, y, width, height}
@@ -162,7 +160,7 @@ create_gui :: proc(
 			".ttf",
 			&FONT_DATA[0],
 			cast(i32)len(FONT_DATA),
-			16,
+			24,
 			nil,
 			0,
 		)
@@ -183,7 +181,14 @@ create_gui :: proc(
 }
 
 destroy_gui :: proc(this: ^Gui) {
+	for name, texture in this.image_table {
+		delete(name)
+		raylib.UnloadTexture(texture)
+	}
 	virtual.arena_destroy(&this.arena)
+	for _, &i in this.data_table {
+		strings.builder_destroy(&i.text_input)
+	}
 	delete(this.data_table)
 	delete(this.prev_style_stack)
 	delete(this.prev_widget_stack)
@@ -195,6 +200,7 @@ destroy_gui :: proc(this: ^Gui) {
 	if !this.using_default_font {
 		raylib.UnloadFont(this.font)
 	}
+	delete(this.image_table)
 	free(this)
 }
 
@@ -203,8 +209,8 @@ create_default_style :: proc() -> WidgetStyle {
 	out.smol_text = 16
 	out.normal_text_size = 24
 	out.large_text_size = 32
-	out.background_color = raylib.DARKGRAY
-	out.widget_color = raylib.GRAY
+	out.background_color = {175, 175, 175, 255}
+	out.widget_color = {170, 170, 170, 255}
 	out.selected_widget_color = raylib.DARKGRAY
 	out.border_color = raylib.BLACK
 	out.text_color = raylib.BLACK
@@ -251,6 +257,7 @@ gui_begin_frame :: proc(this: ^Gui, create_root := true) {
 		}
 	}
 }
+
 create_widget :: proc(
 	this: ^Gui,
 	type: WidgetType,
@@ -274,6 +281,7 @@ get_cached_widget_data :: proc(this: ^Gui, widget: ^Widget) -> ^CachedWidgetData
 		tmp.bounds = this.bounds
 		tmp.was_drawn_this_frame = true
 		this.data_table[widget.id] = tmp
+		tmp.text_input = strings.builder_make_none()
 	}
 	return &this.data_table[widget.id]
 }
@@ -359,7 +367,7 @@ button_thumbnail :: proc(
 	id: string = "",
 	loc := #caller_location,
 ) -> bool {
-	widget := create_widget(this, .Button, id, idx, loc)
+	widget := create_widget(this, .ButtonThumbNail, id, idx, loc)
 	widget.is_leaf = true
 	widget.text = clone_string(this, text)
 	widget.image_name = clone_string(this, thumbnail_name)
@@ -389,17 +397,77 @@ text :: proc(this: ^Gui, text: string, idx := 0, id: string = "", loc := #caller
 	append(&this.current_widget.children, widget)
 }
 
-text_input :: proc(this: ^Gui, text: string, idx := 0, id: string = "", loc := #caller_location) {
-	widget := create_widget(this, .Text, id, idx, loc)
+text_input :: proc(
+	this: ^Gui,
+	cfg_clear_on_new_line: bool = true,
+	cfg_return_only_on_new_line: bool = true,
+	max_width: i32 = -1,
+	max_height: i32 = -1,
+	idx := 0,
+	id: string = "",
+	loc := #caller_location,
+) -> (
+	string,
+	bool,
+) {
+	widget := create_widget(this, .TextInput, id, idx, loc)
 	widget.is_leaf = true
-	widget.text = clone_string(this, text)
 	widget.text_height = widget.style.normal_text_size
+	widget.max_width = max_width
+	widget.max_height = max_height
 	widget.base_text_height = widget.text_height
 	append(&this.current_widget.children, widget)
+	data := get_cached_widget_data(this, widget)
+	return_pressed := false
+	if data.selected {
+		if this.input_data.input_char != cast(rune)0 {
+			strings.write_rune(&data.text_input, this.input_data.input_char)
+		}
+		if raylib.IsKeyPressed(.DELETE) ||
+		   raylib.IsKeyPressed(.BACKSPACE) ||
+		   raylib.IsKeyPressedRepeat(.DELETE) ||
+		   raylib.IsKeyPressedRepeat(.BACKSPACE) {
+			strings.pop_rune(&data.text_input)
+		}
+		if raylib.IsKeyPressed(.ENTER) {
+			return_pressed = true
+			if !cfg_clear_on_new_line {
+				strings.write_rune(&data.text_input, '\n')
+			}
+		}
+		if ((raylib.IsKeyDown(.LEFT_CONTROL) || raylib.IsKeyDown(.LEFT_SUPER)) &&
+			   raylib.IsKeyPressed(.V)) ||
+		   (raylib.IsMouseButtonPressed(.MIDDLE)) {
+			buf := raylib.GetClipboardText()
+			if buf != nil {
+				st := cast(string)buf
+				strings.write_string(&data.text_input, st)
+			}
+		}
+	}
+	did_return_string := false
+	widget.text = strings.clone(strings.to_string(data.text_input), this.alloc)
+	returned_string := ""
+	if (return_pressed || !(cfg_return_only_on_new_line)) {
+		did_return_string = true
+		returned_string = widget.text
+	}
+	if cfg_clear_on_new_line && return_pressed {
+		strings.builder_reset(&data.text_input)
+	}
+	return returned_string, did_return_string
 }
 
-image :: proc(this: ^Gui, img_name: string, idx := 0, id: string = "", loc := #caller_location) {
-	widget := create_widget(this, .Text, id, idx, loc)
+image :: proc(
+	this: ^Gui,
+	img_name: string,
+	max_width: i32 = -1,
+	max_height: i32 = -1,
+	idx := 0,
+	id: string = "",
+	loc := #caller_location,
+) {
+	widget := create_widget(this, .Image, id, idx, loc)
 	widget.is_leaf = true
 	widget.image_name = clone_string(this, img_name)
 	append(&this.current_widget.children, widget)
@@ -487,12 +555,16 @@ end_panel_scrollbox :: proc(this: ^Gui) {
 begin_scrollbox :: proc(
 	this: ^Gui,
 	reversed := false,
+	max_width: i32 = -1,
+	max_height: i32 = -1,
 	idx := 0,
 	id: string = "",
 	loc := #caller_location,
 ) {
 	widget := create_widget(this, .Container, id, idx, loc)
 	widget.is_leaf = false
+	widget.max_height = max_height
+	widget.max_width = max_width
 	widget.container_kind = .ScrollBox
 	widget.scroll_box_reversed = reversed
 	append(&this.current_widget.children, widget)
@@ -529,6 +601,36 @@ gui_determine_layout :: proc(this: ^Gui) {
 	}
 }
 
+gui_register_texture :: proc(this: ^Gui, name: string, texture: raylib.Texture2D) {
+	if name in this.image_table {
+		raylib.UnloadTexture(this.image_table[name])
+		this.image_table[name] = texture
+	} else {
+		this.image_table[strings.clone(name)] = texture
+	}
+}
+
+gui_load_texture :: proc(this: ^Gui, name: string) {
+	if name in this.image_table {
+		return
+	}
+
+	texture := raylib.LoadTexture(strings.clone_to_cstring(name, context.temp_allocator))
+	if !raylib.IsTextureValid(texture) {
+		return
+	}
+	this.image_table[strings.clone(name)] = texture
+}
+
+gui_get_texture :: proc(this: ^Gui, name: string) -> (texture: raylib.Texture2D, is_valid: bool) {
+	gui_load_texture(this, name)
+	if name not_in this.image_table {
+		return
+	}
+	texture = this.image_table[name]
+	is_valid = true
+	return
+}
 
 gui_build_layout :: proc(this: ^Widget, gui: ^Gui, base_x: i32, base_y: i32) {
 	this.bounds.x = base_x
@@ -650,26 +752,15 @@ gui_calculate_dimensions :: proc(
 		switch this.type {
 		case .TextInput:
 			{
-				this.text_height = this.base_text_height
-				for this.text_height >= 12 {
-					width, height := measure_text_given_width(
-						gui,
-						this.text,
-						this.text_height,
-						width_base - this.text_height * 2,
-					)
-					this.bounds.height = height + this.style.padding * 2
-					if this.bounds.height < height_base {
-						this.bounds.height = height_base
-					}
-					this.bounds.width = width + this.style.padding * 2
-					if this.bounds.height <= max_height && this.bounds.width <= max_width {
-						break
-					}
-					this.text_height -= 1
+
+				this.bounds.height = max_height
+				if this.max_height != -1 {
+					this.bounds.height = clamp(this.bounds.height, 0, this.max_height)
 				}
-				assert(this.bounds.width <= width_base, "width< max_width")
-				assert(this.bounds.height <= height_base, "height< max_height")
+				this.bounds.width = max_width
+				if this.max_width != -1 {
+					this.bounds.width = clamp(this.bounds.width, 0, this.max_width)
+				}
 			}
 		case .Text:
 			this.text_height = this.base_text_height
@@ -735,7 +826,13 @@ gui_calculate_dimensions :: proc(
 			assert(this.bounds.height <= height_base, "height< max_height")
 		case .Image:
 			this.bounds.height = max_height
+			if this.max_height != -1 {
+				this.bounds.height = clamp(this.bounds.height, 0, this.max_height)
+			}
 			this.bounds.width = max_width
+			if this.max_width != -1 {
+				this.bounds.width = clamp(this.bounds.width, 0, this.max_width)
+			}
 		case .Container:
 			fallthrough
 		case .None:
@@ -853,8 +950,14 @@ gui_calculate_dimensions :: proc(
 				assert(this.bounds.height <= max_height, "height< max_height")
 			}
 		case .ScrollBox:
-			this.bounds.width = max_width
 			this.bounds.height = max_height
+			if this.max_height != -1 {
+				this.bounds.height = clamp(this.bounds.height, 0, this.max_height)
+			}
+			this.bounds.width = max_width
+			if this.max_width != -1 {
+				this.bounds.width = clamp(this.bounds.width, 0, this.max_width)
+			}
 			guess_max_height: i32 = 2 << 26
 			guess_max_width := max_width - this.style.padding * 2
 			tmax_height := guess_max_height
@@ -883,11 +986,6 @@ gui_calculate_dimensions :: proc(
 		assert(this.bounds.width <= max_width, "width< max_width")
 		assert(this.bounds.height <= max_height, "height< max_height")
 	}
-	/*if this.bounds.width <= max_width {
-		cond_nv :=
-			max_width - this.style.padding * 4 if this.bounds.width * 2 > max_width - this.style.padding * 4 else this.bounds.width * 2
-		this.bounds.width = cond_nv
-	}*/
 }
 
 gui_flex_box_calculations :: proc(
@@ -992,7 +1090,7 @@ gui_flex_box_calculations :: proc(
 	}
 }
 
-gui_render :: proc(this: ^Gui) {
+gui_render :: proc(this: ^Gui, draw_debug_info := false) {
 	raylib.DrawRectangle(
 		this.bounds.x,
 		this.bounds.y,
@@ -1009,34 +1107,63 @@ gui_render :: proc(this: ^Gui) {
 		gui_render_widget(i, this)
 		count += widget_count_children(i)
 	}
-	raylib.DrawText(
-		fmt.ctprintf("widget count:%d", count),
-		this.bounds.x,
-		this.bounds.y,
-		16,
-		raylib.GREEN,
-	)
-	raylib.DrawText(
-		fmt.ctprintf("gui calculation call count:%d", this.debug_calculate_dimension_count),
-		this.bounds.x,
-		this.bounds.y + 16,
-		16,
-		raylib.GREEN,
-	)
-	byte_count := this.arena.total_used
-	capacity := this.arena.total_reserved
-	raylib.DrawText(
-		fmt.ctprintf("current memory use:%d of %d", byte_count, capacity),
-		this.bounds.x,
-		this.bounds.y + 32,
-		16,
-		raylib.GREEN,
-	)
-
+	if draw_debug_info {
+		raylib.DrawText(
+			fmt.ctprintf("widget count:%d", count),
+			this.bounds.x,
+			this.bounds.y,
+			16,
+			raylib.GREEN,
+		)
+		raylib.DrawText(
+			fmt.ctprintf("gui calculation call count:%d", this.debug_calculate_dimension_count),
+			this.bounds.x,
+			this.bounds.y + 16,
+			16,
+			raylib.GREEN,
+		)
+		byte_count := this.arena.total_used
+		capacity := this.arena.total_reserved
+		raylib.DrawText(
+			fmt.ctprintf("current memory use:%d of %d", byte_count, capacity),
+			this.bounds.x,
+			this.bounds.y + 32,
+			16,
+			raylib.GREEN,
+		)
+	}
 }
 
-render_image :: proc(img: string, x: i32, y: i32, width: i32, height: i32, gui: ^Gui) {
-	raylib.DrawRectangle(x, y, width, height, raylib.VIOLET)
+render_image :: proc(
+	img: string,
+	x: i32,
+	y: i32,
+	width: i32,
+	height: i32,
+	gui: ^Gui,
+	tint: raylib.Color,
+) {
+	is_valid := false
+	texture: raylib.Texture2D
+	if img != "" {
+		texture, is_valid = gui_get_texture(gui, img)
+	}
+	if !is_valid {
+		raylib.DrawRectangle(x, y, width, height, raylib.VIOLET)
+		return
+	}
+	src := raylib.Rectangle{0., 0., cast(f32)texture.width, cast(f32)texture.height}
+	draw_width := width
+	draw_height := cast(i32)((cast(f32)texture.height / cast(f32)texture.width) *
+		cast(f32)draw_width)
+	if draw_height > height {
+		draw_height = height
+		draw_width = cast(i32)((cast(f32)texture.width / cast(f32)texture.height) *
+			cast(f32)draw_height)
+	}
+	dst := raylib.Rectangle{cast(f32)x, cast(f32)y, cast(f32)draw_width, cast(f32)draw_height}
+	raylib.DrawTexturePro(texture, src, dst, {0., 0.}, 0., tint)
+
 }
 
 render_text :: proc(this: ^Widget, gui: ^Gui, x_off: i32 = 0, y_off: i32 = 0) {
@@ -1070,6 +1197,7 @@ widget_count_children :: proc(this: ^Widget) -> int {
 	}
 	return out
 }
+
 gui_render_widget :: proc(this: ^Widget, gui: ^Gui) {
 
 	if this.custom_render == nil {
@@ -1093,8 +1221,55 @@ gui_render_widget :: proc(this: ^Widget, gui: ^Gui) {
 					this.bounds.y,
 					this.bounds.width,
 					this.bounds.height,
-					this.style.widget_color if !selected else this.style.selected_widget_color,
+					this.style.widget_color,
 				)
+				{
+					txt, _, _ := split_text_given_width(
+						gui,
+						this.text,
+						this.text_height,
+						this.bounds.width - this.style.padding * 2,
+					)
+					defer delete(txt)
+					to_render_line_count :=
+						((this.bounds.height - this.style.padding * 2) / this.text_height)
+					draw_txt := txt[:]
+					if cast(int)to_render_line_count < len(txt) {
+						draw_txt = txt[(len(txt) - cast(int)to_render_line_count - 1):len(txt)]
+					}
+					dy: i32 = this.style.padding + this.bounds.y
+					dx: i32 = this.style.padding + this.bounds.x
+					dy0 := dy
+					for i, idx in draw_txt {
+						pos := raylib.Vector2{cast(f32)dx, cast(f32)dy}
+						raylib.DrawTextEx(
+							gui.font,
+							fmt.ctprintf("%s", i),
+							pos,
+							cast(f32)this.text_height,
+							1.,
+							this.style.text_color,
+						)
+						dy += this.text_height
+					}
+					if selected {
+						y0 :=
+							dy0 +
+							(this.text_height) *
+								(cast(i32)(len(draw_txt) - 1) if len(draw_txt) > 0 else 0)
+						w0: i32 = 0
+						if len(draw_txt) > 0 {
+							w0 = cast(i32)raylib.MeasureTextEx(gui.font, strings.clone_to_cstring(draw_txt[len(draw_txt) - 1], context.temp_allocator), cast(f32)this.text_height, 1.).x
+						}
+						raylib.DrawRectangle(
+							w0 + dx + 2,
+							y0,
+							4,
+							this.text_height,
+							this.style.text_color,
+						)
+					}
+				}
 				render_text(this, gui)
 			}
 		case .Button:
@@ -1139,8 +1314,9 @@ gui_render_widget :: proc(this: ^Widget, gui: ^Gui) {
 				this.text_height,
 				this.text_height,
 				gui,
+				raylib.WHITE,
 			)
-			render_text(this, gui, this.text_height * 2)
+			render_text(this, gui, this.text_height + this.text_height / 2)
 		case .Image:
 			render_image(
 				this.image_name,
@@ -1149,6 +1325,7 @@ gui_render_widget :: proc(this: ^Widget, gui: ^Gui) {
 				this.bounds.width,
 				this.bounds.height,
 				gui,
+				raylib.WHITE,
 			)
 		case .Container:
 			raylib.DrawRectangle(
@@ -1267,6 +1444,8 @@ gui_on_update :: proc(this: ^Gui) {
 		}
 	}
 	for i in delete_count_set {
+		ts := &this.data_table[i]
+		strings.builder_destroy(&ts.text_input)
 		delete_key(&this.data_table, i)
 	}
 }
