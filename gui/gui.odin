@@ -898,6 +898,8 @@ gui_flex_box_calculations :: proc(
 	is_vertical: bool,
 	depth: int,
 ) {
+	max_height := max_height - this.style.padding * 2
+	max_width := max_width - this.style.padding * 2
 	done_set := make(map[int]u8)
 	defer delete(done_set)
 	reserve(&done_set, len(this.children))

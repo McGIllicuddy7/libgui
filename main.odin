@@ -7,7 +7,7 @@ main :: proc() {
 	raylib.InitWindow(1000, 1000, "gui")
 	defer raylib.CloseWindow()
 	//	raylib.SetTargetFPS(61)
-	wid := gui.create_gui(0, 0, 1000, 1000, can_be_multithreaded = false)
+	wid := gui.create_gui(20, 20, 960, 960, can_be_multithreaded = false)
 	should_exit := false
 	{
 		gui_run(wid, &should_exit)
@@ -36,7 +36,7 @@ gui_run :: proc(gi: ^gui.Gui, should_exit: ^bool) {
 	gui.text(gi, "hello world!")
 	gui.end_div(gi)
 	gui.begin_scrollbox(gi)
-	for i in 0 ..< 1000 {
+	for i in 0 ..< 100 {
 		gui.text(gi, "HELLO WORLD!")
 		if gui.button(gi, fmt.tprintf("exit:%d", i), idx = i) {
 			//should_exit^ = true
@@ -45,7 +45,7 @@ gui_run :: proc(gi: ^gui.Gui, should_exit: ^bool) {
 	}
 	gui.end_scrollbox(gi)
 	gui.begin_scrollbox(gi)
-	for i in 0 ..< 500 {
+	for i in 0 ..< 50 {
 		gui.text(gi, fmt.tprintf("%s: %d", gui.LOREM_IPSUM, i))
 		if gui.button(gi, fmt.tprintf("TESTING 1 2 3 exit:%d", i), idx = i) {
 			//should_exit^ = true
@@ -54,7 +54,7 @@ gui_run :: proc(gi: ^gui.Gui, should_exit: ^bool) {
 	}
 	gui.end_scrollbox(gi)
 	gui.begin_scrollbox(gi)
-	for i in 0 ..< 1000 {
+	for i in 0 ..< 100 {
 		gui.text(gi, "HELLO WORLD 2!\nELECTRIC BOOGALOO!")
 		if gui.button(gi, fmt.tprintf("enter:%d", i), idx = i) {
 			//should_exit^ = true
