@@ -3,6 +3,7 @@ import "base:runtime"
 import "core:fmt"
 import "core:math"
 import "core:mem"
+import "core:mem/virtual"
 import "core:os"
 import "core:slice"
 import "core:strings"
@@ -72,15 +73,15 @@ Widget :: struct {
 
 
 CachedWidgetData :: struct {
+	frame_time:             f64,
+	cached_text:            string,
 	bounds:                 Boundary,
 	scroll_height:          i32,
 	scroll_amount:          i32,
-	selected:               bool,
-	was_drawn_this_frame:   bool,
-	frame_time:             f64,
-	user_data:              [32]u8,
 	guess_max_child_height: i32,
 	guess_max_child_width:  i32,
+	selected:               bool,
+	was_drawn_this_frame:   bool,
 }
 
 InputData :: struct {
@@ -111,24 +112,26 @@ MeasureTextCacheValue :: struct {
 }
 
 Gui :: struct {
-	can_multithread:         bool,
-	bounds:                  Boundary,
-	root:                    ^Widget,
-	panels:                  [dynamic]^Widget,
-	current_widget:          ^Widget,
-	prev_widget_stack:       [dynamic]^Widget,
-	current_style:           ^WidgetStyle,
-	prev_style_stack:        [dynamic]^WidgetStyle,
-	arena:                   mem.Dynamic_Arena,
-	alloc:                   mem.Allocator,
-	data_table:              map[WidgetId]CachedWidgetData,
-	font:                    raylib.Font,
-	input_data:              InputData,
-	default_style:           WidgetStyle,
-	frame_over:              bool,
-	measure_text_cache_lock: sync.RW_Mutex,
-	measure_text_cache:      map[MeasureTextCacheKey]MeasureTextCacheValue,
-	using_default_font:      bool,
+	can_multithread:                            bool,
+	bounds:                                     Boundary,
+	root:                                       ^Widget,
+	panels:                                     [dynamic]^Widget,
+	current_widget:                             ^Widget,
+	prev_widget_stack:                          [dynamic]^Widget,
+	current_style:                              ^WidgetStyle,
+	prev_style_stack:                           [dynamic]^WidgetStyle,
+	arena:                                      virtual.Arena,
+	alloc:                                      mem.Allocator,
+	data_table:                                 map[WidgetId]CachedWidgetData,
+	font:                                       raylib.Font,
+	input_data:                                 InputData,
+	default_style:                              WidgetStyle,
+	frame_over:                                 bool,
+	measure_text_cache_lock:                    sync.RW_Mutex,
+	measure_text_cache:                         map[MeasureTextCacheKey]MeasureTextCacheValue,
+	using_default_font:                         bool,
+	debug_calculate_dimension_count:            int,
+	debug_calculate_dimension_lock_yeah_i_know: sync.Mutex,
 }
 
 make_widget_id :: proc(text: string, loc: runtime.Source_Code_Location, idx: int) -> WidgetId {
@@ -148,7 +151,7 @@ create_gui :: proc(
 	width: i32,
 	height: i32,
 	use_default_font := false,
-	can_be_multithreaded := false,
+	can_be_multithreaded := true,
 ) -> ^Gui {
 	out := new(Gui)
 	out.bounds = {x, y, width, height}
@@ -166,8 +169,9 @@ create_gui :: proc(
 	} else {
 		out.font = raylib.GetFontDefault()
 	}
-	mem.dynamic_arena_init(&out.arena)
-	out.alloc = mem.dynamic_arena_allocator(&out.arena)
+	err := virtual.arena_init_static(&out.arena, 16_777_216)
+	assert(err == nil)
+	out.alloc = virtual.arena_allocator(&out.arena)
 	out.current_style = nil
 	out.current_widget = nil
 	out.prev_style_stack = make([dynamic]^WidgetStyle)
@@ -179,7 +183,7 @@ create_gui :: proc(
 }
 
 destroy_gui :: proc(this: ^Gui) {
-	mem.dynamic_arena_destroy(&this.arena)
+	virtual.arena_destroy(&this.arena)
 	delete(this.data_table)
 	delete(this.prev_style_stack)
 	delete(this.prev_widget_stack)
@@ -212,7 +216,7 @@ gui_begin_frame :: proc(this: ^Gui, create_root := true) {
 	clear(&this.prev_widget_stack)
 	clear(&this.prev_style_stack)
 	clear(&this.panels)
-	mem.dynamic_arena_free_all(&this.arena)
+	virtual.arena_free_all(&this.arena)
 	{
 		this.input_data.input_char = raylib.GetCharPressed()
 		this.input_data.left_mouse_down = raylib.IsMouseButtonDown(.LEFT)
@@ -385,6 +389,15 @@ text :: proc(this: ^Gui, text: string, idx := 0, id: string = "", loc := #caller
 	append(&this.current_widget.children, widget)
 }
 
+text_input :: proc(this: ^Gui, text: string, idx := 0, id: string = "", loc := #caller_location) {
+	widget := create_widget(this, .Text, id, idx, loc)
+	widget.is_leaf = true
+	widget.text = clone_string(this, text)
+	widget.text_height = widget.style.normal_text_size
+	widget.base_text_height = widget.text_height
+	append(&this.current_widget.children, widget)
+}
+
 image :: proc(this: ^Gui, img_name: string, idx := 0, id: string = "", loc := #caller_location) {
 	widget := create_widget(this, .Text, id, idx, loc)
 	widget.is_leaf = true
@@ -504,6 +517,7 @@ end_horizontal_div :: proc(this: ^Gui) {
 
 gui_determine_layout :: proc(this: ^Gui) {
 	if this.root != nil {
+		this.debug_calculate_dimension_count = 0
 		gui_calculate_dimensions(this.root, this, this.bounds.width, this.bounds.height, 0)
 		shift_x := (this.bounds.width - this.root.bounds.width) / 2
 		shift_y := (this.bounds.height - this.root.bounds.height) / 2
@@ -619,10 +633,14 @@ gui_calculate_dimensions :: proc(
 	max_height: i32,
 	depth: int,
 ) {
+	{
+		sync.mutex_lock(&gui.debug_calculate_dimension_lock_yeah_i_know)
+		defer sync.mutex_unlock(&gui.debug_calculate_dimension_lock_yeah_i_know)
+		gui.debug_calculate_dimension_count += 1
+	}
 	depth := depth
 	if depth == 0 {
-		count := widget_count_children(this)
-		if count < 1000 {
+		if widget_count_children(this) < 1000 {
 			depth = 512
 		}
 	}
@@ -668,6 +686,15 @@ gui_calculate_dimensions :: proc(
 					break
 				}
 				this.text_height -= 1
+			}
+			if this.bounds.width > width_base {
+				fmt.printf(
+					"this.bounds.width:%d width_base:%d this.bounds.height:%d height_base:%d",
+					this.bounds.width,
+					width_base,
+					this.bounds.height,
+					height_base,
+				)
 			}
 			assert(this.bounds.width <= width_base, "width< max_width")
 			assert(this.bounds.height <= height_base, "height< max_height")
@@ -815,152 +842,20 @@ gui_calculate_dimensions :: proc(
 		switch this.container_kind {
 		case .VerticalContainer:
 			{
-				base_guess_max_height :=
-					(2 * (max_height - this.style.padding * 2)) / (l) -
-					(this.style.padding + 1) * l
-				guess_max_height := base_guess_max_height
-				{
-					data := get_cached_widget_data(gui, this)
-					if data.guess_max_child_width != 0 {
-						guess_max_height = data.guess_max_child_height
-					}
-				}
-				assert(guess_max_height > 0)
-				count := -1
-				for {
-					dx: i32 = 0
-					dy: i32 = this.style.padding
-					t_max_width := max_width - this.style.padding * 2
-					t_max_height := guess_max_height
-					calculate_child_dimensions(
-						gui,
-						this.children[:],
-						t_max_width,
-						t_max_height,
-						depth,
-					)
-					for i in this.children {
-						if i.bounds.width + this.style.padding * 2 > dx {
-							dx = i.bounds.width + this.style.padding * 2
-						}
-						dy += i.bounds.height + this.style.padding
-					}
-					if count == -1 {
-						if dy <= max_height && math.abs(dy - max_height) < 40 {
-							this.bounds.height = dy
-							this.bounds.width = dx
-							{
-								tmp := get_cached_widget_data(gui, this)
-								tmp.guess_max_child_height = t_max_height
-							}
-							break
-						} else {
-							guess_max_height = base_guess_max_height
-						}
-					} else {
-						if dy <= max_height {
-							this.bounds.height = dy
-							this.bounds.width = dx
-							{
-								tmp := get_cached_widget_data(gui, this)
-								tmp.guess_max_child_height = t_max_height
-							}
-							break
-						} else {
-							disp := (dy - guess_max_height - this.style.padding * (l + 1))
-							delta: i32 = 8
-							if count == 0 {
-								delta = disp / (l)
-							} else if count < 3 {
-								delta = disp / (l * 8)
-							} else {
-								delta = disp / l
-							}
-							if delta < 0 {
-								delta = 1
-							}
-							guess_max_height -= delta
-						}
-					}
-					count += 1
-				}
+				gui_flex_box_calculations(this, gui, max_width, max_height, true, depth)
+				assert(this.bounds.width <= max_width, "width< max_width")
+				assert(this.bounds.height <= max_height, "height< max_height")
 			}
 		case .HorizontalContainer:
 			{
-				count := -1
-				base_guess_max_width :=
-					(2 * (max_width - this.style.padding * 2)) / (l) - (this.style.padding + 1) * l
-				guess_max_width := base_guess_max_width
-				{
-					data := get_cached_widget_data(gui, this)
-					if data.guess_max_child_width != 0 {
-						guess_max_width = data.guess_max_child_width
-					}
-				}
-				assert(guess_max_width > 0)
-				for {
-					dx: i32 = 0
-					dy: i32 = this.style.padding
-					t_max_width := guess_max_width
-					t_max_height := max_height - this.style.padding * 2
-					calculate_child_dimensions(
-						gui,
-						this.children[:],
-						t_max_width,
-						t_max_height,
-						depth,
-					)
-					for i in this.children {
-						if i.bounds.height + this.style.padding * 2 > dy {
-							dy = i.bounds.height + this.style.padding * 2
-						}
-						tmp_w := i.bounds.width
-						dx += tmp_w + this.style.padding
-					}
-					if count == -1 {
-						if dx <= max_width && (max_width - dx) <= 40 {
-							this.bounds.height = dy
-							this.bounds.width = dx
-							{
-								tmp := get_cached_widget_data(gui, this)
-								tmp.guess_max_child_width = t_max_width
-							}
-							break
-						} else {
-							guess_max_width = base_guess_max_width
-						}
-					} else {
-						if dx <= max_width && (math.abs(dx - max_width) < 20 || count > 4) {
-							this.bounds.height = dy
-							this.bounds.width = dx
-							{
-								tmp := get_cached_widget_data(gui, this)
-								tmp.guess_max_child_width = t_max_width
-							}
-							break
-						} else {
-							disp := (dx - guess_max_width - this.style.padding * (l + 1))
-							delta: i32 = 8
-							if count == 0 {
-								delta = disp / (l)
-							} else if count < 3 {
-								delta = disp / (l * 8)
-							} else {
-								delta = disp / l
-							}
-							if delta < 0 {
-								delta = 1
-							}
-							guess_max_width -= delta
-						}
-					}
-					count += 1
-				}
+				gui_flex_box_calculations(this, gui, max_width, max_height, false, depth)
+				assert(this.bounds.width <= max_width, "width< max_width")
+				assert(this.bounds.height <= max_height, "height< max_height")
 			}
 		case .ScrollBox:
 			this.bounds.width = max_width
 			this.bounds.height = max_height
-			guess_max_height: i32 = 2 << 24
+			guess_max_height: i32 = 2 << 26
 			guess_max_width := max_width - this.style.padding * 2
 			tmax_height := guess_max_height
 			calculate_child_dimensions(
@@ -978,8 +873,8 @@ gui_calculate_dimensions :: proc(
 				}
 				mx_y += i.bounds.height + this.style.padding
 			}
-			if this.bounds.width > 4 * mx_x {
-				this.bounds.width = 4 * mx_x
+			if this.bounds.width > (3 * mx_x) / 2 {
+				this.bounds.width = (3 * mx_x) / 2
 			}
 			if this.bounds.height > gui.bounds.height - this.style.padding * 2 {
 				this.bounds.height = gui.bounds.height - this.style.padding * 2
@@ -993,7 +888,106 @@ gui_calculate_dimensions :: proc(
 			max_width - this.style.padding * 4 if this.bounds.width * 2 > max_width - this.style.padding * 4 else this.bounds.width * 2
 		this.bounds.width = cond_nv
 	}*/
+}
 
+gui_flex_box_calculations :: proc(
+	this: ^Widget,
+	gui: ^Gui,
+	max_width: i32,
+	max_height: i32,
+	is_vertical: bool,
+	depth: int,
+) {
+	done_set := make(map[int]u8)
+	defer delete(done_set)
+	reserve(&done_set, len(this.children))
+	for i in this.children {
+		i.bounds = {}
+	}
+	l: i32 = cast(i32)len(this.children) if len(this.children) > 0 else 1
+	if is_vertical {
+		max_height_guess :=
+			((max_height - this.style.padding * 2) - (this.style.padding + 1) * l) / l
+		max_width_guess := max_width - this.style.padding * 2
+		for len(done_set) < len(this.children) {
+			not_done_count: i32 = 0
+			dy: i32 = this.style.padding
+			for i, idx in this.children {
+				base_height: i32 = i.bounds.height
+				if idx in done_set {
+					dy += base_height + this.style.padding
+					continue
+				}
+				gui_calculate_dimensions(i, gui, max_width_guess, max_height_guess, depth + 1)
+				tmp := i.bounds.height
+				dy += tmp + this.style.padding
+				if tmp == base_height {
+					done_set[idx] = 0
+				} else {
+					not_done_count += 1
+				}
+			}
+			if not_done_count == 0 {
+				break
+			}
+			remainder := (max_height - dy) / (not_done_count)
+			max_height_guess += remainder
+			if remainder <= 0 {
+				break
+			}
+		}
+		max_width_measured: i32 = 0
+		delta_height: i32 = this.style.padding
+		for i in this.children {
+			if i.bounds.width > max_width_measured {
+				max_width_measured = i.bounds.width
+			}
+			delta_height += i.bounds.height + this.style.padding
+		}
+		this.bounds.width = max_width_measured + this.style.padding * 2
+		this.bounds.height = delta_height
+	} else {
+		max_width_guess :=
+			((max_width - this.style.padding * 2) - (this.style.padding + 1) * l) / l
+		max_height_guess := max_height - this.style.padding * 2
+		for len(done_set) < len(this.children) {
+			not_done_count: i32 = 0
+			dx: i32 = this.style.padding
+			for i, idx in this.children {
+				base_width: i32 = i.bounds.width
+				if idx in done_set {
+					dx += base_width + this.style.padding
+					continue
+				}
+				gui_calculate_dimensions(i, gui, max_width_guess, max_height_guess, depth + 1)
+				tmp := i.bounds.width
+				dx += tmp + this.style.padding
+				if tmp == base_width {
+					done_set[idx] = 0
+				} else {
+					not_done_count += 1
+				}
+			}
+			if not_done_count == 0 {
+				break
+			}
+			remainder := (max_width - dx) / (not_done_count)
+			max_width_guess += remainder
+			if remainder <= 0 {
+				break
+			}
+		}
+		max_height_measured: i32 = 0
+		delta_width: i32 = this.style.padding
+		for i in this.children {
+			if i.bounds.height > max_height_measured {
+				max_height_measured = i.bounds.height
+			}
+			delta_width += i.bounds.width + this.style.padding
+		}
+		this.bounds.width = delta_width
+		this.bounds.height = max_height_measured + this.style.padding * 2
+	}
 }
 
 gui_render :: proc(this: ^Gui) {
@@ -1020,6 +1014,23 @@ gui_render :: proc(this: ^Gui) {
 		16,
 		raylib.GREEN,
 	)
+	raylib.DrawText(
+		fmt.ctprintf("gui calculation call count:%d", this.debug_calculate_dimension_count),
+		this.bounds.x,
+		this.bounds.y + 16,
+		16,
+		raylib.GREEN,
+	)
+	byte_count := this.arena.total_used
+	capacity := this.arena.total_reserved
+	raylib.DrawText(
+		fmt.ctprintf("current memory use:%d of %d", byte_count, capacity),
+		this.bounds.x,
+		this.bounds.y + 32,
+		16,
+		raylib.GREEN,
+	)
+
 }
 
 render_image :: proc(img: string, x: i32, y: i32, width: i32, height: i32, gui: ^Gui) {

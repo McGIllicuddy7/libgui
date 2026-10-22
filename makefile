@@ -1,4 +1,4 @@
 make: .
-	odin build . -out:a.out -sanitize:address -debug 
+	odin build . -out:a.out -debug -sanitize:address
 release:
-	odin build . -out:a.out -o:speed
+	odin build . -out:a.out -o:aggressive
