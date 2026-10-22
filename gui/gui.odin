@@ -729,7 +729,7 @@ gui_calculate_dimensions :: proc(
 					)
 				}
 			}
-			if depth <= 3 && len(widgets) > 4 && gui.can_multithread {
+			if depth <= 3 && depth > 0 && len(widgets) > 4 && gui.can_multithread {
 				@(static) THREAD_COUNT_LOCK: sync.Mutex
 				@(static) THREAD_COUNT: int = -1
 				{
@@ -805,7 +805,10 @@ gui_calculate_dimensions :: proc(
 		switch this.container_kind {
 		case .VerticalContainer:
 			{
-				guess_max_height := max_height - this.style.padding * 2
+				guess_max_height :=
+					(2 * (max_height - this.style.padding * 2)) / (l) -
+					(this.style.padding + 1) * l
+				assert(guess_max_height > 0)
 				count := 0
 				for {
 					dx: i32 = 0
@@ -831,13 +834,18 @@ gui_calculate_dimensions :: proc(
 						break
 					} else {
 						disp := (dy - guess_max_height)
-						delta: i32 = 16
-						if count == 0 {
-							delta = disp / l
-						} else if count <= 3 {
+						delta: i32 = 8
+						if count < 2 {
 							delta = disp / (l * 2)
-						} else if count <= 6 {
-							delta = disp / (l * 4)
+						} else if count < 4 {
+							delta = disp / (l * 8)
+						} else if count < 8 {
+							delta = disp / (l * 16)
+						} else {
+							delta = disp / (l * 32)
+						}
+						if delta < 0 {
+							delta = 1
 						}
 						guess_max_height -= delta
 					}
@@ -847,7 +855,9 @@ gui_calculate_dimensions :: proc(
 		case .HorizontalContainer:
 			{
 				count := 0
-				guess_max_width := max_width - this.style.padding * 2
+				guess_max_width :=
+					(2 * (max_width - this.style.padding * 2)) / (l) - (this.style.padding + 1) * l
+				assert(guess_max_width > 0)
 				for {
 					dx: i32 = 0
 					dy: i32 = this.style.padding
@@ -860,11 +870,13 @@ gui_calculate_dimensions :: proc(
 						t_max_height,
 						depth,
 					)
+
 					for i in this.children {
 						if i.bounds.height + this.style.padding * 2 > dy {
 							dy = i.bounds.height + this.style.padding * 2
 						}
-						dx += i.bounds.width + this.style.padding
+						tmp_w := i.bounds.width
+						dx += tmp_w + this.style.padding
 					}
 					if dx <= max_width {
 						this.bounds.height = dy
@@ -872,20 +884,23 @@ gui_calculate_dimensions :: proc(
 						break
 					} else {
 						disp := (dx - guess_max_width)
-						delta: i32 = 16
-						if count == 0 {
+						delta: i32 = 8
+						if count < 2 {
 							delta = disp / (l * 2)
-						} else if count <= 6 {
-							delta = disp / (l * 4)
-						} else if count <= 12 {
+						} else if count < 4 {
 							delta = disp / (l * 8)
+						} else if count < 8 {
+							delta = disp / (l * 16)
+						} else {
+							delta = disp / (l * 32)
+						}
+						if delta < 0 {
+							delta = 1
 						}
 						guess_max_width -= delta
 					}
 					count += 1
 				}
-
-
 			}
 		case .ScrollBox:
 			this.bounds.width = max_width
