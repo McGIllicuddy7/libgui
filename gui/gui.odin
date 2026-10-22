@@ -72,13 +72,15 @@ Widget :: struct {
 
 
 CachedWidgetData :: struct {
-	bounds:               Boundary,
-	scroll_height:        i32,
-	scroll_amount:        i32,
-	selected:             bool,
-	was_drawn_this_frame: bool,
-	frame_time:           f64,
-	user_data:            [32]u8,
+	bounds:                 Boundary,
+	scroll_height:          i32,
+	scroll_amount:          i32,
+	selected:               bool,
+	was_drawn_this_frame:   bool,
+	frame_time:             f64,
+	user_data:              [32]u8,
+	guess_max_child_height: i32,
+	guess_max_child_width:  i32,
 }
 
 InputData :: struct {
@@ -140,10 +142,18 @@ make_widget_id :: proc(text: string, loc: runtime.Source_Code_Location, idx: int
 @(rodata)
 FONT_DATA: []u8 = #load("../Ac437_IBM_VGA_9x16.ttf")
 
-create_gui :: proc(x: i32, y: i32, width: i32, height: i32) -> ^Gui {
+create_gui :: proc(
+	x: i32,
+	y: i32,
+	width: i32,
+	height: i32,
+	use_default_font := false,
+	can_be_multithreaded := false,
+) -> ^Gui {
 	out := new(Gui)
 	out.bounds = {x, y, width, height}
-	out.using_default_font = true
+	out.using_default_font = use_default_font
+	out.can_multithread = can_be_multithreaded
 	if !out.using_default_font {
 		out.font = raylib.LoadFontFromMemory(
 			".ttf",
@@ -805,11 +815,18 @@ gui_calculate_dimensions :: proc(
 		switch this.container_kind {
 		case .VerticalContainer:
 			{
-				guess_max_height :=
+				base_guess_max_height :=
 					(2 * (max_height - this.style.padding * 2)) / (l) -
 					(this.style.padding + 1) * l
+				guess_max_height := base_guess_max_height
+				{
+					data := get_cached_widget_data(gui, this)
+					if data.guess_max_child_width != 0 {
+						guess_max_height = data.guess_max_child_height
+					}
+				}
 				assert(guess_max_height > 0)
-				count := 0
+				count := -1
 				for {
 					dx: i32 = 0
 					dy: i32 = this.style.padding
@@ -828,33 +845,58 @@ gui_calculate_dimensions :: proc(
 						}
 						dy += i.bounds.height + this.style.padding
 					}
-					if dy <= max_height {
-						this.bounds.height = dy
-						this.bounds.width = dx
-						break
-					} else {
-						disp := (dy - guess_max_height - this.style.padding * (l + 1))
-						delta: i32 = 8
-						if count == 0 {
-							delta = disp / (l)
-						} else if count < 3 {
-							delta = disp / (l * 8)
+					if count == -1 {
+						if dy <= max_height && math.abs(dy - max_height) < 40 {
+							this.bounds.height = dy
+							this.bounds.width = dx
+							{
+								tmp := get_cached_widget_data(gui, this)
+								tmp.guess_max_child_height = t_max_height
+							}
+							break
 						} else {
-							delta = disp / l
+							guess_max_height = base_guess_max_height
 						}
-						if delta < 0 {
-							delta = 1
+					} else {
+						if dy <= max_height {
+							this.bounds.height = dy
+							this.bounds.width = dx
+							{
+								tmp := get_cached_widget_data(gui, this)
+								tmp.guess_max_child_height = t_max_height
+							}
+							break
+						} else {
+							disp := (dy - guess_max_height - this.style.padding * (l + 1))
+							delta: i32 = 8
+							if count == 0 {
+								delta = disp / (l)
+							} else if count < 3 {
+								delta = disp / (l * 8)
+							} else {
+								delta = disp / l
+							}
+							if delta < 0 {
+								delta = 1
+							}
+							guess_max_height -= delta
 						}
-						guess_max_height -= delta
 					}
 					count += 1
 				}
 			}
 		case .HorizontalContainer:
 			{
-				count := 0
-				guess_max_width :=
+				count := -1
+				base_guess_max_width :=
 					(2 * (max_width - this.style.padding * 2)) / (l) - (this.style.padding + 1) * l
+				guess_max_width := base_guess_max_width
+				{
+					data := get_cached_widget_data(gui, this)
+					if data.guess_max_child_width != 0 {
+						guess_max_width = data.guess_max_child_width
+					}
+				}
 				assert(guess_max_width > 0)
 				for {
 					dx: i32 = 0
@@ -875,24 +917,42 @@ gui_calculate_dimensions :: proc(
 						tmp_w := i.bounds.width
 						dx += tmp_w + this.style.padding
 					}
-					if dx <= max_width {
-						this.bounds.height = dy
-						this.bounds.width = dx
-						break
-					} else {
-						disp := (dx - guess_max_width - this.style.padding * (l + 1))
-						delta: i32 = 8
-						if count == 0 {
-							delta = disp / (l)
-						} else if count < 3 {
-							delta = disp / (l * 8)
+					if count == -1 {
+						if dx <= max_width && (max_width - dx) <= 40 {
+							this.bounds.height = dy
+							this.bounds.width = dx
+							{
+								tmp := get_cached_widget_data(gui, this)
+								tmp.guess_max_child_width = t_max_width
+							}
+							break
 						} else {
-							delta = disp / l
+							guess_max_width = base_guess_max_width
 						}
-						if delta < 0 {
-							delta = 1
+					} else {
+						if dx <= max_width && (math.abs(dx - max_width) < 20 || count > 4) {
+							this.bounds.height = dy
+							this.bounds.width = dx
+							{
+								tmp := get_cached_widget_data(gui, this)
+								tmp.guess_max_child_width = t_max_width
+							}
+							break
+						} else {
+							disp := (dx - guess_max_width - this.style.padding * (l + 1))
+							delta: i32 = 8
+							if count == 0 {
+								delta = disp / (l)
+							} else if count < 3 {
+								delta = disp / (l * 8)
+							} else {
+								delta = disp / l
+							}
+							if delta < 0 {
+								delta = 1
+							}
+							guess_max_width -= delta
 						}
-						guess_max_width -= delta
 					}
 					count += 1
 				}
