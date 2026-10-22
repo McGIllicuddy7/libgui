@@ -143,7 +143,7 @@ FONT_DATA: []u8 = #load("../Ac437_IBM_VGA_9x16.ttf")
 create_gui :: proc(x: i32, y: i32, width: i32, height: i32) -> ^Gui {
 	out := new(Gui)
 	out.bounds = {x, y, width, height}
-	out.using_default_font = false
+	out.using_default_font = true
 	if !out.using_default_font {
 		out.font = raylib.LoadFontFromMemory(
 			".ttf",
@@ -833,15 +833,14 @@ gui_calculate_dimensions :: proc(
 						this.bounds.width = dx
 						break
 					} else {
-						disp := (dy - guess_max_height)
+						disp := (dy - guess_max_height - this.style.padding * (l + 1))
 						delta: i32 = 8
 						if count == 0 {
 							delta = disp / (l)
+						} else if count < 3 {
+							delta = disp / (l * 8)
 						} else {
-							delta = disp / (l * 4)
-						}
-						if delta < 0 {
-							delta = 1
+							delta = disp / l
 						}
 						if delta < 0 {
 							delta = 1
@@ -869,7 +868,6 @@ gui_calculate_dimensions :: proc(
 						t_max_height,
 						depth,
 					)
-
 					for i in this.children {
 						if i.bounds.height + this.style.padding * 2 > dy {
 							dy = i.bounds.height + this.style.padding * 2
@@ -882,12 +880,14 @@ gui_calculate_dimensions :: proc(
 						this.bounds.width = dx
 						break
 					} else {
-						disp := (dx - guess_max_width)
+						disp := (dx - guess_max_width - this.style.padding * (l + 1))
 						delta: i32 = 8
 						if count == 0 {
 							delta = disp / (l)
+						} else if count < 3 {
+							delta = disp / (l * 8)
 						} else {
-							delta = disp / (l * 4)
+							delta = disp / l
 						}
 						if delta < 0 {
 							delta = 1

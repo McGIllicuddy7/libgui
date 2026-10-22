@@ -36,7 +36,7 @@ gui_run :: proc(gi: ^gui.Gui, should_exit: ^bool) {
 	gui.text(gi, "HI TOAST I LOVE YOU <3")
 	gui.text(gi, "hello world!")
 	gui.end_div(gi)
-	/*
+
 	gui.begin_scrollbox(gi, true)
 	for i in 0 ..< 50 {
 		gui.text(gi, "HELLO WORLD!")
@@ -45,7 +45,7 @@ gui_run :: proc(gi: ^gui.Gui, should_exit: ^bool) {
 			fmt.printf("clicked button:%d\n", i)
 		}
 	}
-	gui.end_scrollbox(gi)*/
+	gui.end_scrollbox(gi)
 	gui.begin_scrollbox(gi)
 	for i in 0 ..< 100 {
 		gui.text(gi, fmt.tprintf("%s: %d", gui.LOREM_IPSUM, i))
