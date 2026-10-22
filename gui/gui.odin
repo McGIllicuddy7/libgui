@@ -835,14 +835,13 @@ gui_calculate_dimensions :: proc(
 					} else {
 						disp := (dy - guess_max_height)
 						delta: i32 = 8
-						if count < 2 {
-							delta = disp / (l * 2)
-						} else if count < 4 {
-							delta = disp / (l * 8)
-						} else if count < 8 {
-							delta = disp / (l * 16)
+						if count == 0 {
+							delta = disp / (l)
 						} else {
-							delta = disp / (l * 32)
+							delta = disp / (l * 4)
+						}
+						if delta < 0 {
+							delta = 1
 						}
 						if delta < 0 {
 							delta = 1
@@ -885,14 +884,10 @@ gui_calculate_dimensions :: proc(
 					} else {
 						disp := (dx - guess_max_width)
 						delta: i32 = 8
-						if count < 2 {
-							delta = disp / (l * 2)
-						} else if count < 4 {
-							delta = disp / (l * 8)
-						} else if count < 8 {
-							delta = disp / (l * 16)
+						if count == 0 {
+							delta = disp / (l)
 						} else {
-							delta = disp / (l * 32)
+							delta = disp / (l * 4)
 						}
 						if delta < 0 {
 							delta = 1
@@ -905,7 +900,7 @@ gui_calculate_dimensions :: proc(
 		case .ScrollBox:
 			this.bounds.width = max_width
 			this.bounds.height = max_height
-			guess_max_height: i32 = 2 << 12
+			guess_max_height: i32 = 2 << 24
 			guess_max_width := max_width - this.style.padding * 2
 			tmax_height := guess_max_height
 			calculate_child_dimensions(
@@ -916,13 +911,18 @@ gui_calculate_dimensions :: proc(
 				depth,
 			)
 			mx_x: i32 = 0
+			mx_y: i32 = this.style.padding
 			for i in this.children {
 				if i.bounds.width + this.style.padding * 2 > mx_x {
-					mx_x = i.bounds.width + this.style.padding
+					mx_x = i.bounds.width + this.style.padding * 2
 				}
+				mx_y += i.bounds.height + this.style.padding
 			}
 			if this.bounds.width > 4 * mx_x {
 				this.bounds.width = 4 * mx_x
+			}
+			if this.bounds.height > gui.bounds.height - this.style.padding * 2 {
+				this.bounds.height = gui.bounds.height - this.style.padding * 2
 			}
 		}
 		assert(this.bounds.width <= max_width, "width< max_width")
