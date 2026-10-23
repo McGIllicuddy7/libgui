@@ -52,6 +52,7 @@ WidgetType :: enum {
 	ButtonThumbNail,
 	Image,
 	Container,
+	Custom,
 }
 
 Widget :: struct {
@@ -68,6 +69,9 @@ Widget :: struct {
 	image_name:          string,
 	children:            [dynamic]^Widget,
 	custom_render:       proc(this: ^Widget, gui: ^Gui, data: ^CachedWidgetData, frame_time: f64),
+	custom_tooltip:      proc(this: ^Widget, gui: ^Gui, data: ^CachedWidgetData, frame_time: f64),
+	custom_update:       proc(this: ^Widget, gui: ^Gui, data: ^CachedWidgetData, frame_time: f64),
+	custom_user_data:    rawptr,
 	is_leaf:             bool,
 	scroll_box_reversed: bool,
 	container_kind:      ContainerKind,
@@ -214,7 +218,7 @@ create_default_style :: proc() -> WidgetStyle {
 	out.normal_text_size = 24
 	out.large_text_size = 32
 	out.background_color = {175, 175, 175, 255}
-	out.widget_color = {170, 170, 170, 255}
+	out.widget_color = {167, 167, 167, 255}
 	out.selected_widget_color = raylib.DARKGRAY
 	out.border_color = raylib.BLACK
 	out.text_color = raylib.BLACK
@@ -877,7 +881,8 @@ gui_calculate_dimensions :: proc(
 			}*/
 		//	assert(this.bounds.height > 20)
 		//assert(this.bounds.width > 20)
-
+		case .Custom:
+			assert(false, "todo custom dimension calculation")
 		case .Container:
 			fallthrough
 		case .None:
@@ -1492,7 +1497,8 @@ gui_render_widget :: proc(this: ^Widget, gui: ^Gui) {
 				)
 				raylib.EndScissorMode()
 			}
-
+		case .Custom:
+			assert(false, "todo render custom widgets")
 		case .None:
 			assert(false)
 		}
@@ -1580,7 +1586,8 @@ gui_render_widget_tooltip :: proc(this: ^Widget, gui: ^Gui) {
 		if this.container_kind == .ScrollBox {
 			raylib.EndScissorMode()
 		}
-
+	case .Custom:
+		assert(false, "todo custom tooltip rendering")
 	case .None:
 		assert(false)
 	}

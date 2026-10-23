@@ -1,98 +1,71 @@
 package main
 import "core:fmt"
+import "core:mem"
+import "core:os"
 import "core:strings"
-import "gui"
-import "vendor:raylib"
+import "er"
+Class :: enum {
+	Fighter,
+	Priest,
+	Thief,
+	MagicUser,
+	Illusionist,
+	Bard,
+}
+PlayerCharacter :: struct {
+	name:         string "owned",
+	class:        Class,
+	level:        int,
+	strength:     int,
+	dexterity:    int,
+	constitution: int,
+	intelligence: int,
+	wisdom:       int,
+	charisma:     int,
+	ac:           int,
+	hp:           int,
+	inventory:    [dynamic]string,
+}
 
 main :: proc() {
-	raylib.InitWindow(1600, 1000, "gui")
-	defer raylib.CloseWindow()
-	//	raylib.SetTargetFPS(61)
-	wid := gui.create_gui(0, 0, 1600, 1000)
-	should_exit := false
-	show_debug_info := false
-	list := make([dynamic]string)
-	{
-		gui_run(wid, &should_exit, &show_debug_info, &list)
-
-	}
-	defer gui.destroy_gui(wid)
-	if true {
-		for !raylib.WindowShouldClose() {
-			gui_run(wid, &should_exit, &show_debug_info, &list)
-			if should_exit {
-				break
-			}
-			raylib.BeginDrawing()
-			raylib.ClearBackground(raylib.BLACK)
-			gui.gui_render(wid, show_debug_info)
-			raylib.DrawFPS(950, 50)
-			raylib.EndDrawing()
-		}
+	track: mem.Tracking_Allocator
+	mem.tracking_allocator_init(&track, context.allocator)
+	defer mem.tracking_allocator_destroy(&track)
+	context.allocator = mem.tracking_allocator(&track)
+	main_proc()
+	for _, leak in track.allocation_map {
+		fmt.printf("%v leaked %m\n", leak.location, leak.size)
 	}
 }
 
-gui_run :: proc(gi: ^gui.Gui, should_exit: ^bool, draw_debug: ^bool, list: ^[dynamic]string) {
-	gui.gui_begin_frame(gi)
-	gui.begin_div(gi)
-	if gui.button(gi, "exit") {
-		should_exit^ = true
+main_proc :: proc() {
+	al := new(PlayerCharacter)
+	al.name = strings.clone("Al Jenkins")
+	al.class = .Fighter
+	al.level = 5
+	al.strength = 16
+	al.dexterity = 14
+	al.constitution = 18
+	al.intelligence = 10
+	al.wisdom = 10
+	al.charisma = 8
+	al.ac = 16
+	al.hp = 10
+	tmp_inventory: []string = {
+		"longsword",
+		"scale mail",
+		"shield",
+		"2 pairs of breeches",
+		"2 pairs of trousers",
+		"short bow",
+		"10 days rations",
+		"20 arrows",
 	}
-	gui.text(gi, "HI TOAST I LOVE YOU <3", "testing 1 2 3")
-	gui.text(gi, "hello world!")
-
-	if draw_debug^ {
-		if gui.button(gi, "hide debug info") {
-			draw_debug^ = false
-		}
-	} else {
-		if gui.button(gi, "show debug info") {
-			draw_debug^ = true
-		}
+	list := make([dynamic]string)
+	for i in tmp_inventory {
+		append(&list, i)
 	}
-	gui.image(gi, "kenku.png", "kenku.png")
-	text, entered := gui.text_input(gi)
-	if entered && text != "" {
-		append(list, strings.clone(text))
-	}
-
-	gui.begin_scrollbox(gi, true, false)
-	for i, idx in list^ {
-		gui.text(gi, i, idx = idx)
-	}
-	gui.end_scrollbox(gi)
-	if gui.button(gi, "reset list") {
-		for i in list^ {
-			delete(i)
-		}
-		clear(list)
-	}
-	gui.end_div(gi)
-	gui.begin_scrollbox(gi, reversed = true)
-	for i in 0 ..< 100 {
-		gui.text(gi, "HELLO WORLD!")
-		if gui.button_thumbnail(gi, "kenku.png", fmt.tprintf("exit:%d", i), idx = i) {
-			//should_exit^ = true
-			append(list, fmt.aprintf("clicked button:%d", i))
-		}
-	}
-	gui.end_scrollbox(gi)
-	gui.begin_scrollbox(gi)
-	for i in 0 ..< 50 {
-		gui.text(gi, fmt.tprintf("%s: %d", gui.LOREM_IPSUM, i))
-		if gui.button(gi, fmt.tprintf("TESTING 1 2 3 exit:%d", i), idx = i) {
-			//should_exit^ = true
-			append(list, fmt.aprintf("second clicked button:%d", i))
-		}
-	}
-	gui.end_scrollbox(gi)
-	gui.begin_scrollbox(gi)
-	for i in 0 ..< 100 {
-		gui.text(gi, "HELLO WORLD 2! ELECTRIC BOOGALOO!")
-		if gui.button(gi, fmt.tprintf("enter:%d", i), idx = i) {
-			append(list, fmt.aprintf("clicked button 3:%d", i))
-		}
-	}
-	gui.end_scrollbox(gi)
-	gui.gui_end_frame(gi)
+	al.inventory = list
+	fmt.printf("al:%v\n", al)
+	er.run_destructor(al)
 }
