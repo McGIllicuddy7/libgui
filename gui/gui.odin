@@ -11,6 +11,9 @@ import "core:sync"
 import "core:thread"
 import "core:unicode/utf8"
 import "vendor:raylib"
+
+SCROLL_BOX_SCROLLER_WIDTH :: 15
+SCROLL_BOX_SCROLL_HEIGHT :: 30
 Color :: raylib.Color
 Boundary :: struct {
 	x, y, width, height: i32,
@@ -69,6 +72,7 @@ Widget :: struct {
 	scroll_box_reversed: bool,
 	container_kind:      ContainerKind,
 	tool_tip_text:       string,
+	compact:             bool,
 }
 
 
@@ -215,6 +219,7 @@ create_default_style :: proc() -> WidgetStyle {
 	out.border_color = raylib.BLACK
 	out.text_color = raylib.BLACK
 	out.padding = 2
+	out.rounded_corners = true
 	return out
 }
 
@@ -335,6 +340,7 @@ gui_end_widget :: proc(this: ^Gui) {
 button :: proc(
 	this: ^Gui,
 	text: string,
+	tool_tip: string = "",
 	idx := 0,
 	id: string = "",
 	loc := #caller_location,
@@ -342,6 +348,9 @@ button :: proc(
 	widget := create_widget(this, .Button, id, idx, loc)
 	widget.is_leaf = true
 	widget.text = clone_string(this, text)
+	if tool_tip != "" {
+		widget.tool_tip_text = clone_string(this, tool_tip)
+	}
 	widget.text_height = widget.style.normal_text_size
 	widget.base_text_height = widget.text_height
 	append(&this.current_widget.children, widget)
@@ -363,6 +372,7 @@ button_thumbnail :: proc(
 	this: ^Gui,
 	thumbnail_name: string,
 	text: string,
+	tool_tip: string = "",
 	idx := 0,
 	id: string = "",
 	loc := #caller_location,
@@ -370,6 +380,9 @@ button_thumbnail :: proc(
 	widget := create_widget(this, .ButtonThumbNail, id, idx, loc)
 	widget.is_leaf = true
 	widget.text = clone_string(this, text)
+	if tool_tip != "" {
+		widget.tool_tip_text = clone_string(this, tool_tip)
+	}
 	widget.image_name = clone_string(this, thumbnail_name)
 	widget.text_height = widget.style.normal_text_size
 	widget.base_text_height = widget.text_height
@@ -388,10 +401,20 @@ button_thumbnail :: proc(
 	return out
 }
 
-text :: proc(this: ^Gui, text: string, idx := 0, id: string = "", loc := #caller_location) {
+text :: proc(
+	this: ^Gui,
+	text: string,
+	tool_tip: string = "",
+	idx := 0,
+	id: string = "",
+	loc := #caller_location,
+) {
 	widget := create_widget(this, .Text, id, idx, loc)
 	widget.is_leaf = true
 	widget.text = clone_string(this, text)
+	if tool_tip != "" {
+		widget.tool_tip_text = clone_string(this, tool_tip)
+	}
 	widget.text_height = widget.style.normal_text_size
 	widget.base_text_height = widget.text_height
 	append(&this.current_widget.children, widget)
@@ -444,6 +467,18 @@ text_input :: proc(
 				strings.write_string(&data.text_input, st)
 			}
 		}
+		if data.selected {
+			if (raylib.IsKeyDown(.LEFT_CONTROL) || raylib.IsKeyDown(.LEFT_SUPER)) &&
+			   raylib.IsKeyPressed(.X) {
+				raylib.SetClipboardText(
+					strings.clone_to_cstring(
+						strings.to_string(data.text_input),
+						context.temp_allocator,
+					),
+				)
+				strings.builder_reset(&data.text_input)
+			}
+		}
 	}
 	did_return_string := false
 	widget.text = strings.clone(strings.to_string(data.text_input), this.alloc)
@@ -461,6 +496,7 @@ text_input :: proc(
 image :: proc(
 	this: ^Gui,
 	img_name: string,
+	tool_tip: string = "",
 	max_width: i32 = -1,
 	max_height: i32 = -1,
 	idx := 0,
@@ -469,7 +505,12 @@ image :: proc(
 ) {
 	widget := create_widget(this, .Image, id, idx, loc)
 	widget.is_leaf = true
+	widget.max_width = max_width
+	widget.max_height = max_height
 	widget.image_name = clone_string(this, img_name)
+	if tool_tip != "" {
+		widget.tool_tip_text = clone_string(this, tool_tip)
+	}
 	append(&this.current_widget.children, widget)
 }
 
@@ -555,6 +596,7 @@ end_panel_scrollbox :: proc(this: ^Gui) {
 begin_scrollbox :: proc(
 	this: ^Gui,
 	reversed := false,
+	compact := true,
 	max_width: i32 = -1,
 	max_height: i32 = -1,
 	idx := 0,
@@ -563,6 +605,7 @@ begin_scrollbox :: proc(
 ) {
 	widget := create_widget(this, .Container, id, idx, loc)
 	widget.is_leaf = false
+	widget.compact = compact
 	widget.max_height = max_height
 	widget.max_width = max_width
 	widget.container_kind = .ScrollBox
@@ -703,11 +746,8 @@ gui_build_layout :: proc(this: ^Widget, gui: ^Gui, base_x: i32, base_y: i32) {
 						+this.bounds.height +
 						data.scroll_amount -
 						(this.style.padding * cast(i32)len(this.children))
-					if len(this.children) > 0 {
-						base_y += this.children[0].bounds.height
-					}
-					for idx in 1 ..= len(this.children) {
-						i := this.children[len(this.children) - idx]
+					for idx in 0 ..< len(this.children) {
+						i := this.children[idx]
 						gui_build_layout(i, gui, base_x + dx, base_y + dy)
 						dy += i.bounds.height + this.style.padding * 2
 					}
@@ -752,7 +792,6 @@ gui_calculate_dimensions :: proc(
 		switch this.type {
 		case .TextInput:
 			{
-
 				this.bounds.height = max_height
 				if this.max_height != -1 {
 					this.bounds.height = clamp(this.bounds.height, 0, this.max_height)
@@ -833,6 +872,12 @@ gui_calculate_dimensions :: proc(
 			if this.max_width != -1 {
 				this.bounds.width = clamp(this.bounds.width, 0, this.max_width)
 			}
+		/*if this.bounds.height < 20 || this.bounds.width < 20 {
+				fmt.printf("width:%d, height:%d\n", this.bounds.width, this.bounds.height)
+			}*/
+		//	assert(this.bounds.height > 20)
+		//assert(this.bounds.width > 20)
+
 		case .Container:
 			fallthrough
 		case .None:
@@ -959,7 +1004,7 @@ gui_calculate_dimensions :: proc(
 				this.bounds.width = clamp(this.bounds.width, 0, this.max_width)
 			}
 			guess_max_height: i32 = 2 << 26
-			guess_max_width := max_width - this.style.padding * 2
+			guess_max_width := max_width - this.style.padding * 2 - SCROLL_BOX_SCROLLER_WIDTH
 			tmax_height := guess_max_height
 			calculate_child_dimensions(
 				gui,
@@ -976,8 +1021,8 @@ gui_calculate_dimensions :: proc(
 				}
 				mx_y += i.bounds.height + this.style.padding
 			}
-			if this.bounds.width > (3 * mx_x) / 2 {
-				this.bounds.width = (3 * mx_x) / 2
+			if this.bounds.width > (3 * mx_x) / 2 + 10 && this.compact {
+				this.bounds.width = (3 * mx_x) / 2 + 10
 			}
 			if this.bounds.height > gui.bounds.height - this.style.padding * 2 {
 				this.bounds.height = gui.bounds.height - this.style.padding * 2
@@ -1107,6 +1152,12 @@ gui_render :: proc(this: ^Gui, draw_debug_info := false) {
 		gui_render_widget(i, this)
 		count += widget_count_children(i)
 	}
+	if this.root != nil {
+		gui_render_widget_tooltip(this.root, this)
+	}
+	for i in this.panels {
+		gui_render_widget_tooltip(i, this)
+	}
 	if draw_debug_info {
 		raylib.DrawText(
 			fmt.ctprintf("widget count:%d", count),
@@ -1167,26 +1218,34 @@ render_image :: proc(
 }
 
 render_text :: proc(this: ^Widget, gui: ^Gui, x_off: i32 = 0, y_off: i32 = 0) {
-	txt, _, _ := split_text_given_width(
-		gui,
+	render_text_exp(
 		this.text,
 		this.text_height,
 		this.bounds.width - this.style.padding * 2,
+		this.bounds.x + x_off,
+		this.bounds.y + y_off,
+		this.style.text_color,
+		gui,
 	)
+}
+
+render_text_exp :: proc(
+	text: string,
+	text_height: i32,
+	max_width: i32,
+	x: i32,
+	y: i32,
+	color: raylib.Color,
+	gui: ^Gui,
+) {
+	txt, _, _ := split_text_given_width(gui, text, text_height, max_width)
 	defer (delete(txt))
-	dy: i32 = this.style.padding + this.bounds.y + y_off
-	dx: i32 = this.style.padding + this.bounds.x + x_off
+	dy: i32 = y
+	dx: i32 = x
 	for i in txt {
 		pos := raylib.Vector2{cast(f32)dx, cast(f32)dy}
-		raylib.DrawTextEx(
-			gui.font,
-			fmt.ctprintf("%s", i),
-			pos,
-			cast(f32)this.text_height,
-			1.,
-			this.style.text_color,
-		)
-		dy += this.text_height
+		raylib.DrawTextEx(gui.font, fmt.ctprintf("%s", i), pos, cast(f32)text_height, 1., color)
+		dy += text_height
 	}
 }
 
@@ -1198,8 +1257,21 @@ widget_count_children :: proc(this: ^Widget) -> int {
 	return out
 }
 
-gui_render_widget :: proc(this: ^Widget, gui: ^Gui) {
+gui_draw_rectangle :: proc(x, y, width, height: i32, rounded: bool, color: Color) {
+	if rounded {
+		radius: f32 = 0.08
+		raylib.DrawRectangleRounded(
+			{cast(f32)x, cast(f32)y, cast(f32)width, cast(f32)height},
+			radius,
+			64,
+			color,
+		)
+	} else {
+		raylib.DrawRectangle(x, y, width, height, color)
+	}
+}
 
+gui_render_widget :: proc(this: ^Widget, gui: ^Gui) {
 	if this.custom_render == nil {
 		switch this.type {
 		case .Text:
@@ -1209,18 +1281,20 @@ gui_render_widget :: proc(this: ^Widget, gui: ^Gui) {
 		case .TextInput:
 			{
 				selected := gui.data_table[this.id].selected
-				raylib.DrawRectangle(
+				gui_draw_rectangle(
 					this.bounds.x - 2,
 					this.bounds.y - 2,
 					this.bounds.width + 4,
 					this.bounds.height + 4,
+					this.style.rounded_corners,
 					this.style.border_color,
 				)
-				raylib.DrawRectangle(
+				gui_draw_rectangle(
 					this.bounds.x,
 					this.bounds.y,
 					this.bounds.width,
 					this.bounds.height,
+					this.style.rounded_corners,
 					this.style.widget_color,
 				)
 				{
@@ -1232,10 +1306,10 @@ gui_render_widget :: proc(this: ^Widget, gui: ^Gui) {
 					)
 					defer delete(txt)
 					to_render_line_count :=
-						((this.bounds.height - this.style.padding * 2) / this.text_height)
+						((this.bounds.height - this.style.padding * 2) / (this.text_height))
 					draw_txt := txt[:]
-					if cast(int)to_render_line_count < len(txt) {
-						draw_txt = txt[(len(txt) - cast(int)to_render_line_count - 1):len(txt)]
+					if cast(int)to_render_line_count < len(txt) + 1 {
+						draw_txt = txt[(len(txt) - cast(int)to_render_line_count):len(txt)]
 					}
 					dy: i32 = this.style.padding + this.bounds.y
 					dx: i32 = this.style.padding + this.bounds.x
@@ -1261,50 +1335,58 @@ gui_render_widget :: proc(this: ^Widget, gui: ^Gui) {
 						if len(draw_txt) > 0 {
 							w0 = cast(i32)raylib.MeasureTextEx(gui.font, strings.clone_to_cstring(draw_txt[len(draw_txt) - 1], context.temp_allocator), cast(f32)this.text_height, 1.).x
 						}
-						raylib.DrawRectangle(
+						if w0 > this.bounds.width - this.style.padding * 2 {
+							w0 = this.style.padding
+							y0 += this.text_height
+						}
+						gui_draw_rectangle(
 							w0 + dx + 2,
 							y0,
 							4,
 							this.text_height,
+							this.style.rounded_corners,
 							this.style.text_color,
 						)
 					}
 				}
-				render_text(this, gui)
 			}
 		case .Button:
 			{
 				selected := gui.data_table[this.id].selected
-				raylib.DrawRectangle(
+				gui_draw_rectangle(
 					this.bounds.x - 2,
 					this.bounds.y - 2,
 					this.bounds.width + 4,
 					this.bounds.height + 4,
+					this.style.rounded_corners,
 					this.style.border_color,
 				)
-				raylib.DrawRectangle(
+				gui_draw_rectangle(
 					this.bounds.x,
 					this.bounds.y,
 					this.bounds.width,
 					this.bounds.height,
+					this.style.rounded_corners,
 					this.style.widget_color if !selected else this.style.selected_widget_color,
 				)
-				render_text(this, gui)
+				render_text(this, gui, this.style.padding, this.style.padding)
 			}
 		case .ButtonThumbNail:
 			selected := gui.data_table[this.id].selected
-			raylib.DrawRectangle(
+			gui_draw_rectangle(
 				this.bounds.x - 2,
 				this.bounds.y - 2,
 				this.bounds.width + 4,
 				this.bounds.height + 4,
+				this.style.rounded_corners,
 				this.style.border_color,
 			)
-			raylib.DrawRectangle(
+			gui_draw_rectangle(
 				this.bounds.x,
 				this.bounds.y,
 				this.bounds.width,
 				this.bounds.height,
+				this.style.rounded_corners,
 				this.style.widget_color if !selected else this.style.selected_widget_color,
 			)
 			render_image(
@@ -1316,7 +1398,12 @@ gui_render_widget :: proc(this: ^Widget, gui: ^Gui) {
 				gui,
 				raylib.WHITE,
 			)
-			render_text(this, gui, this.text_height + this.text_height / 2)
+			render_text(
+				this,
+				gui,
+				this.text_height + this.text_height / 2 + this.style.padding,
+				this.style.padding,
+			)
 		case .Image:
 			render_image(
 				this.image_name,
@@ -1328,18 +1415,20 @@ gui_render_widget :: proc(this: ^Widget, gui: ^Gui) {
 				raylib.WHITE,
 			)
 		case .Container:
-			raylib.DrawRectangle(
+			gui_draw_rectangle(
 				this.bounds.x - 2,
 				this.bounds.y - 2,
 				this.bounds.width + 4,
 				this.bounds.height + 4,
+				false,
 				this.style.border_color,
 			)
-			raylib.DrawRectangle(
+			gui_draw_rectangle(
 				this.bounds.x,
 				this.bounds.y,
 				this.bounds.width,
 				this.bounds.height,
+				false,
 				this.style.background_color,
 			)
 			if this.container_kind == .ScrollBox {
@@ -1368,6 +1457,39 @@ gui_render_widget :: proc(this: ^Widget, gui: ^Gui) {
 				}
 			}
 			if this.container_kind == .ScrollBox {
+				data := get_cached_widget_data(gui, this)
+				raylib.DrawLine(
+					this.bounds.x + this.bounds.width - SCROLL_BOX_SCROLLER_WIDTH,
+					this.bounds.y,
+					this.bounds.x + this.bounds.width - SCROLL_BOX_SCROLLER_WIDTH,
+					this.bounds.y + this.bounds.height,
+					this.style.border_color,
+				)
+				dy := calculate_scroll_box_slider_position(
+					data.scroll_amount,
+					data.scroll_height,
+					(this.bounds.height),
+					this.scroll_box_reversed,
+				)
+				if this.scroll_box_reversed && len(this.children) == 0 {
+					dy = this.bounds.height - SCROLL_BOX_SCROLL_HEIGHT
+				}
+				gui_draw_rectangle(
+					this.bounds.x + this.bounds.width - SCROLL_BOX_SCROLLER_WIDTH,
+					this.bounds.y + dy,
+					SCROLL_BOX_SCROLLER_WIDTH,
+					SCROLL_BOX_SCROLL_HEIGHT,
+					this.style.rounded_corners,
+					this.style.border_color,
+				)
+				gui_draw_rectangle(
+					this.bounds.x + this.bounds.width - SCROLL_BOX_SCROLLER_WIDTH + 2,
+					this.bounds.y + dy + 2,
+					SCROLL_BOX_SCROLLER_WIDTH - 2,
+					SCROLL_BOX_SCROLL_HEIGHT - 2,
+					this.style.rounded_corners,
+					this.style.selected_widget_color,
+				)
 				raylib.EndScissorMode()
 			}
 
@@ -1384,49 +1506,181 @@ gui_render_widget :: proc(this: ^Widget, gui: ^Gui) {
 	}
 }
 
-gui_on_update :: proc(this: ^Gui) {
-	gui_update_widget :: proc(this: ^Widget, gui: ^Gui) {
-		if this.id in gui.data_table {
-			tmp := &gui.data_table[this.id]
-			tmp.bounds = this.bounds
-			tmp.was_drawn_this_frame = true
-			mouse_intersecting :=
-				this.bounds.x <= gui.input_data.mouse_x &&
-				this.bounds.y <= gui.input_data.mouse_y &&
-				this.bounds.x + this.bounds.width > gui.input_data.mouse_x &&
-				this.bounds.y + this.bounds.height > gui.input_data.mouse_y
-			if this.is_leaf {
-				if mouse_intersecting {
-					if this.type == .TextInput && gui.input_data.left_mouse_released {
+
+gui_render_widget_tooltip :: proc(this: ^Widget, gui: ^Gui) {
+
+	switch this.type {
+	case .TextInput:
+	case .Text:
+		fallthrough
+	case .Button:
+		fallthrough
+	case .ButtonThumbNail:
+		fallthrough
+	case .Image:
+		if this.tool_tip_text == "" {
+			return
+		}
+		if !gui.input_data.left_mouse_down &&
+		   gui.input_data.mouse_x >= this.bounds.x &&
+		   gui.input_data.mouse_x < this.bounds.x + this.bounds.width &&
+		   gui.input_data.mouse_y >= this.bounds.y &&
+		   gui.input_data.mouse_y < this.bounds.y + this.bounds.height {
+			width, height := measure_text_given_width(
+				gui,
+				this.tool_tip_text,
+				this.style.smol_text,
+				this.bounds.width - this.style.padding * 2,
+			)
+			dx := (this.bounds.width - width - this.style.padding * 2) / 2
+			dy := this.bounds.height - 4
+			raylib.DrawRectangle(
+				this.bounds.x + dx,
+				this.bounds.y + dy,
+				width + this.style.padding * 2,
+				height + this.style.padding * 2,
+				this.style.widget_color,
+			)
+			render_text_exp(
+				this.tool_tip_text,
+				this.style.smol_text,
+				this.bounds.width,
+				this.bounds.x + this.style.padding + dx,
+				this.bounds.y + this.style.padding + dy,
+				this.style.text_color,
+				gui,
+			)
+		}
+	case .Container:
+		if this.container_kind == .ScrollBox {
+			raylib.BeginScissorMode(
+				this.bounds.x,
+				this.bounds.y,
+				this.bounds.width,
+				this.bounds.height,
+			)
+		}
+		p_bds := raylib.Rectangle {
+			cast(f32)this.bounds.x,
+			cast(f32)this.bounds.y,
+			cast(f32)this.bounds.width,
+			cast(f32)this.bounds.height,
+		}
+		for i in this.children {
+			bds := raylib.Rectangle {
+				cast(f32)i.bounds.x,
+				cast(f32)i.bounds.y,
+				cast(f32)i.bounds.width,
+				cast(f32)i.bounds.height,
+			}
+			if raylib.CheckCollisionRecs(p_bds, bds) {
+				gui_render_widget_tooltip(i, gui)
+			}
+		}
+		if this.container_kind == .ScrollBox {
+			raylib.EndScissorMode()
+		}
+
+	case .None:
+		assert(false)
+	}
+}
+gui_update_widget :: proc(this: ^Widget, gui: ^Gui) {
+	if this.id in gui.data_table {
+		tmp := &gui.data_table[this.id]
+		tmp.bounds = this.bounds
+		tmp.was_drawn_this_frame = true
+		mouse_intersecting :=
+			this.bounds.x <= gui.input_data.mouse_x &&
+			this.bounds.y <= gui.input_data.mouse_y &&
+			this.bounds.x + this.bounds.width > gui.input_data.mouse_x &&
+			this.bounds.y + this.bounds.height > gui.input_data.mouse_y
+		if this.is_leaf {
+			if mouse_intersecting {
+				if this.type == .TextInput && gui.input_data.left_mouse_released {
+					tmp.selected = true
+				} else if this.type == .Button || this.type == .ButtonThumbNail {
+					if gui.input_data.left_mouse_pressed {
 						tmp.selected = true
-					} else if this.type == .Button || this.type == .ButtonThumbNail {
-						if gui.input_data.left_mouse_pressed {
-							tmp.selected = true
-						} else if gui.input_data.left_mouse_released {
-							tmp.selected = false
-						}
-					}
-				} else {
-					if gui.input_data.left_mouse_released {
+					} else if gui.input_data.left_mouse_released {
 						tmp.selected = false
 					}
 				}
 			} else {
+				if gui.input_data.left_mouse_released {
+					tmp.selected = false
+				}
+			}
+		} else {
+			if this.container_kind == .ScrollBox && mouse_intersecting {
+				tmp.scroll_amount -= cast(i32)(gui.input_data.mouse_wheel_delta * 2.)
+				if tmp.scroll_amount < 0 {
+					tmp.scroll_amount = 0
+				} else if tmp.scroll_amount > tmp.scroll_height {
+					tmp.scroll_amount = tmp.scroll_height
+				}
+			}
+			if this.container_kind == .ScrollBox && gui.input_data.left_mouse_down {
+				amnt := calculate_scroll_box_slider_position(
+					tmp.scroll_amount,
+					tmp.scroll_height,
+					this.bounds.height,
+					this.scroll_box_reversed,
+				)
+				base_y := amnt + this.bounds.y
+				base_x := this.bounds.x + this.bounds.width - SCROLL_BOX_SCROLLER_WIDTH / 2
+				if (base_x <= gui.input_data.mouse_x &&
+					   gui.input_data.mouse_x < base_x + SCROLL_BOX_SCROLLER_WIDTH &&
+					   base_y <= gui.input_data.mouse_y &&
+					   gui.input_data.mouse_y < base_y + SCROLL_BOX_SCROLL_HEIGHT) ||
+				   tmp.selected {
+					tmp.selected = true
+					amnt = gui.input_data.mouse_y - this.bounds.y
+					tmp.scroll_amount = calculate_scroll_amount_from_scroll_box_slide_position(
+						amnt,
+						tmp.scroll_height,
+						this.bounds.height,
+						this.scroll_box_reversed,
+					)
+				}
+			} else {
 				tmp.selected = false
-				if this.container_kind == .ScrollBox && mouse_intersecting {
-					tmp.scroll_amount -= cast(i32)(gui.input_data.mouse_wheel_delta * 2.)
-					if tmp.scroll_amount < 0 {
-						tmp.scroll_amount = 0
-					} else if tmp.scroll_amount > tmp.scroll_height {
-						tmp.scroll_amount = tmp.scroll_height
-					}
+			}
+			if this.container_kind == .ScrollBox {
+				tmp.scroll_amount = clamp(tmp.scroll_amount, 0, tmp.scroll_height)
+			}
+		}
+	}
+	for i in this.children {
+		gui_update_widget(i, gui)
+	}
+	if this.is_leaf {
+		mx := gui.input_data.mouse_x
+		my := gui.input_data.mouse_y
+		col :=
+			(mx >= this.bounds.x &&
+				mx < this.bounds.x + this.bounds.width &&
+				my >= this.bounds.y &&
+				my < this.bounds.y + this.bounds.height) ||
+			get_cached_widget_data(gui, this).selected
+		if col {
+			if (raylib.IsKeyDown(.LEFT_CONTROL) || raylib.IsKeyDown(.LEFT_SUPER)) &&
+			   raylib.IsKeyPressed(.C) {
+				if this.type == .Image {
+					raylib.SetClipboardText(
+						strings.clone_to_cstring(this.image_name, context.temp_allocator),
+					)
+				} else {
+					raylib.SetClipboardText(
+						strings.clone_to_cstring(this.text, context.temp_allocator),
+					)
 				}
 			}
 		}
-		for i in this.children {
-			gui_update_widget(i, gui)
-		}
 	}
+}
+
+gui_on_update :: proc(this: ^Gui) {
 	for _, &i in this.data_table {
 		i.was_drawn_this_frame = false
 	}
@@ -1447,6 +1701,36 @@ gui_on_update :: proc(this: ^Gui) {
 		ts := &this.data_table[i]
 		strings.builder_destroy(&ts.text_input)
 		delete_key(&this.data_table, i)
+	}
+}
+
+calculate_scroll_box_slider_position :: proc(
+	scroll_amount: i32,
+	total_height: i32,
+	widget_height: i32,
+	is_reversed: bool,
+) -> i32 {
+	widget_height := widget_height - 20
+	percentage := cast(f64)scroll_amount / cast(f64)total_height
+	if is_reversed {
+		return cast(i32)(cast(f64)widget_height - cast(f64)widget_height * percentage)
+	} else {
+		return cast(i32)(cast(f64)cast(f64)widget_height * percentage)
+	}
+}
+
+calculate_scroll_amount_from_scroll_box_slide_position :: proc(
+	slider_position: i32,
+	total_height: i32,
+	widget_height: i32,
+	is_reversed: bool,
+) -> i32 {
+	widget_height := widget_height - 20
+	percentage := cast(f64)slider_position / cast(f64)widget_height
+	if is_reversed {
+		return cast(i32)(cast(f64)(total_height) * (1 - percentage))
+	} else {
+		return cast(i32)(cast(f64)(total_height) * percentage)
 	}
 }
 
