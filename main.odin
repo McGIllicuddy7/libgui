@@ -24,7 +24,7 @@ PlayerCharacter :: struct {
 	charisma:     int,
 	ac:           int,
 	hp:           int,
-	inventory:    [dynamic]string,
+	inventory:    []string "shallow",
 }
 
 main :: proc() {
@@ -65,7 +65,7 @@ main_proc :: proc() {
 	for i in tmp_inventory {
 		append(&list, i)
 	}
-	al.inventory = list
-	fmt.printf("al:%v\n", al)
+	al.inventory = list[:]
+	fmt.printf("al:%v\n", al^)
 	er.run_destructor(al)
 }
