@@ -1,4 +1,4 @@
-package er
+package bane
 
 import "base:intrinsics"
 import "base:runtime"
@@ -66,25 +66,41 @@ ObjectKey :: struct {
 	id:  typeid,
 }
 
-run_destructor :: proc(value: any, debug := false) {
+run_destructor :: proc(
+	value: any,
+	debug := false,
+	context_based_destructor_list: ^map[typeid]proc(ptr: rawptr) = nil,
+	allocator := context.allocator,
+	allow_allocators := false,
+) {
 	to_free_set := make(map[rawptr]mem.Allocator)
 	defer delete(to_free_set)
 	reached_set := make(map[ObjectKey]u8)
 	defer delete(reached_set)
 	allocator_list := make([dynamic]AllocatorToDestruct)
 	defer delete(allocator_list)
+	destructor_list: ^map[typeid]proc(ptr: rawptr)
+	tmp_list: map[typeid]proc(ptr: rawptr) = make(map[typeid]proc(ptr: rawptr))
+	defer delete(tmp_list)
+	if context_based_destructor_list == nil {
+		destructor_list = &tmp_list
+	}
+	old_alloc := context.allocator
+	context.allocator = allocator
 	run_destructor_inner(
 		value,
 		&to_free_set,
 		&reached_set,
 		.Boxed,
 		debug,
-		context.allocator,
 		&allocator_list,
+		destructor_list,
+		allow_allocators,
 	)
 	for i, all in to_free_set {
 		free(i, all)
 	}
+	context.allocator = old_alloc
 	for &i in allocator_list {
 		switch &v in i {
 		case mem.Dynamic_Arena:
@@ -104,10 +120,18 @@ run_destructor_inner :: proc(
 	reached_set: ^map[ObjectKey]u8,
 	owned: BoxedState,
 	debug: bool,
-	base_allocator: mem.Allocator,
 	allocator_list: ^[dynamic]AllocatorToDestruct,
+	context_based_destructor_list: ^map[typeid]proc(ptr: rawptr),
+	allow_allocators: bool,
 ) {
-	alloc := base_allocator
+	alloc := context.allocator
+	if value.id in context_based_destructor_list^ {
+		tmp := (context_based_destructor_list^)[value.id]
+		if tmp != nil {
+			tmp(value.data)
+			return
+		}
+	}
 	info := type_info_of(value.id)
 	vk := ObjectKey {
 		ptr = value.data,
@@ -134,15 +158,25 @@ run_destructor_inner :: proc(
 				reached_set,
 				to_run,
 				debug,
-				alloc,
 				allocator_list,
+				context_based_destructor_list,
+				allow_allocators,
 			)
 			to_free_set^[ans.data] = alloc
 		}
 	} else if reflect.is_array(info) {
 		id := 0
 		for i, idx in reflect.iterate_array(value, &id) {
-			run_destructor_inner(i, to_free_set, reached_set, owned, debug, alloc, allocator_list)
+			run_destructor_inner(
+				i,
+				to_free_set,
+				reached_set,
+				owned,
+				debug,
+				allocator_list,
+				context_based_destructor_list,
+				allow_allocators,
+			)
 		}
 	} else if reflect.is_slice(info) {
 		id := 0
@@ -158,8 +192,9 @@ run_destructor_inner :: proc(
 					reached_set,
 					to_run,
 					debug,
-					alloc,
 					allocator_list,
+					context_based_destructor_list,
+					allow_allocators,
 				)
 			}
 			slc: ^runtime.Raw_Slice = cast(^runtime.Raw_Slice)value.data
@@ -172,7 +207,16 @@ run_destructor_inner :: proc(
 			to_run = .Unowned
 		}
 		for i, idx in reflect.iterate_array(value, &id) {
-			run_destructor_inner(i, to_free_set, reached_set, to_run, debug, alloc, allocator_list)
+			run_destructor_inner(
+				i,
+				to_free_set,
+				reached_set,
+				to_run,
+				debug,
+				allocator_list,
+				context_based_destructor_list,
+				allow_allocators,
+			)
 		}
 		slc: ^runtime.Raw_Dynamic_Array = cast(^runtime.Raw_Dynamic_Array)value.data
 		(to_free_set^)[slc.data] = slc.allocator
@@ -189,8 +233,9 @@ run_destructor_inner :: proc(
 				reached_set,
 				to_run,
 				debug,
-				alloc,
 				allocator_list,
+				context_based_destructor_list,
+				allow_allocators,
 			)
 			run_destructor_inner(
 				val,
@@ -198,8 +243,9 @@ run_destructor_inner :: proc(
 				reached_set,
 				to_run,
 				debug,
-				alloc,
 				allocator_list,
+				context_based_destructor_list,
+				allow_allocators,
 			)
 		}
 		mp: ^runtime.Raw_Map = cast(^runtime.Raw_Map)value.data
@@ -217,32 +263,91 @@ run_destructor_inner :: proc(
 			}
 		}
 	} else if reflect.is_struct(info) {
-		if info.id == mem.Dynamic_Arena {
-			value_ptr := cast(^mem.Dynamic_Arena)value.data
-			append(allocator_list, value_ptr^)
-			return
-		} else if info.id == mem.Scratch_Allocator {
-			value_ptr := cast(^mem.Scratch_Allocator)value.data
-			append(allocator_list, value_ptr^)
-			return
-		} else if info.id == virtual.Arena {
-			value_ptr := cast(^virtual.Arena)value.data
-			append(allocator_list, value_ptr^)
-			return
-		} else if info.id == mem.Stack ||
-		   info.id == mem.Buddy_Allocator ||
-		   info.id == mem.Tracking_Allocator ||
-		   info.id == mem.Arena ||
-		   info.id == mem.Compat_Allocator {
-			return
+		if allow_allocators {
+			if info.id == mem.Dynamic_Arena {
+				value_ptr := cast(^mem.Dynamic_Arena)value.data
+				append(allocator_list, value_ptr^)
+				return
+			} else if info.id == mem.Scratch_Allocator {
+				value_ptr := cast(^mem.Scratch_Allocator)value.data
+				append(allocator_list, value_ptr^)
+				return
+			} else if info.id == virtual.Arena {
+				value_ptr := cast(^virtual.Arena)value.data
+				append(allocator_list, value_ptr^)
+				return
+			} else if info.id == mem.Stack ||
+			   info.id == mem.Buddy_Allocator ||
+			   info.id == mem.Tracking_Allocator ||
+			   info.id == mem.Arena ||
+			   info.id == mem.Compat_Allocator {
+				return
+			}
+		} else {
+			if info.id == mem.Dynamic_Arena ||
+			   info.id == mem.Scratch_Allocator ||
+			   info.id == virtual.Arena ||
+			   info.id == mem.Stack ||
+			   info.id == mem.Buddy_Allocator ||
+			   info.id == mem.Tracking_Allocator ||
+			   info.id == mem.Arena ||
+			   info.id == mem.Compat_Allocator {
+				s := fmt.aprintf(
+					"\nERROR:PANIC cannot generically free allocators under current configuration, found an allocator:%v in struct\n",
+					info.id,
+				)
+				defer delete(s)
+				{
+					panic(s)
+				}
+			}
 		}
 		fields := reflect.struct_fields_zipped(value.id)
 		t_alloc: mem.Allocator = alloc
-		for i in fields {
-			if i.type.id == mem.Allocator {
-				t_alloc = (cast(^mem.Allocator)reflect.struct_field_value(value, i).data)^
+		if allow_allocators {
+			for i in fields {
+				if i.type.id == mem.Allocator {
+					tmp_1 := (cast(^mem.Allocator)reflect.struct_field_value(value, i).data)^
+					if tmp_1.procedure != nil {
+						t_alloc = tmp_1
+					}
+				}
+			}
+		} else {
+			for i in fields {
+				if i.type.id == mem.Allocator {
+					s := fmt.aprintf(
+						"\n\nERROR: PANIC cannot generically free allocators under current configuration, found an allocator in struct %v in field:\"%v\"\n",
+						value.id,
+						i.name,
+					)
+					defer delete(s)
+					{
+						panic(s)
+					}
+				}
+				if i.type.id == mem.Dynamic_Arena ||
+				   i.type.id == mem.Scratch_Allocator ||
+				   i.type.id == virtual.Arena ||
+				   i.type.id == mem.Stack ||
+				   i.type.id == mem.Buddy_Allocator ||
+				   i.type.id == mem.Tracking_Allocator ||
+				   i.type.id == mem.Arena ||
+				   i.type.id == mem.Compat_Allocator {
+					s := fmt.aprintf(
+						"\nERROR:PANIC cannot generically free allocators under current configuration, found an allocator:%v in field %v of struct %v\n",
+						i.type.id,
+						i.name,
+						value.id,
+					)
+					defer delete(s)
+					{
+						panic(s)
+					}
+				}
 			}
 		}
+		context.allocator = t_alloc
 		name := ""
 		#partial switch v in info.variant {
 		case (reflect.Type_Info_Named):
@@ -282,8 +387,9 @@ run_destructor_inner :: proc(
 					reached_set,
 					state,
 					debug,
-					t_alloc,
 					allocator_list,
+					context_based_destructor_list,
+					allow_allocators,
 				)
 			}
 		} else {
@@ -293,13 +399,23 @@ run_destructor_inner :: proc(
 				reached_set,
 				owning_state,
 				debug,
-				t_alloc,
 				allocator_list,
+				context_based_destructor_list,
+				allow_allocators,
 			)
 		}
 	} else if reflect.is_union(info) {
 		v := reflect.get_union_variant(value)
-		run_destructor_inner(v, to_free_set, reached_set, .Boxed, debug, alloc, allocator_list)
+		run_destructor_inner(
+			v,
+			to_free_set,
+			reached_set,
+			.Boxed,
+			debug,
+			allocator_list,
+			context_based_destructor_list,
+			allow_allocators,
+		)
 	} else if reflect.is_fixed_capacity_dynamic_array(info) {
 		id := 0
 		to_run := owned
@@ -307,7 +423,16 @@ run_destructor_inner :: proc(
 			to_run = .Unowned
 		}
 		for i, idx in reflect.iterate_array(value, &id) {
-			run_destructor_inner(i, to_free_set, reached_set, to_run, debug, alloc, allocator_list)
+			run_destructor_inner(
+				i,
+				to_free_set,
+				reached_set,
+				to_run,
+				debug,
+				allocator_list,
+				context_based_destructor_list,
+				allow_allocators,
+			)
 		}
 	} else {
 		return

@@ -3,6 +3,7 @@ import "core:fmt"
 import "core:mem"
 import "core:os"
 import "core:strings"
+import "des"
 import "er"
 Class :: enum {
 	Fighter,
@@ -12,6 +13,7 @@ Class :: enum {
 	Illusionist,
 	Bard,
 }
+
 PlayerCharacter :: struct {
 	name:         string "owned",
 	class:        Class,
@@ -67,5 +69,5 @@ main_proc :: proc() {
 	}
 	al.inventory = list[:]
 	fmt.printf("al:%v\n", al^)
-	er.run_destructor(al)
+	des.run_destructor(al)
 }
